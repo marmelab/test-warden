@@ -11,16 +11,20 @@ export function buildCommand(runner, resultsFile, reporterPath, extra) {
   return `./node_modules/.bin/vitest --watch --reporter=default --reporter=json --outputFile=${resultsFile}${args}`;
 }
 
-// Normalize a parsed jest AggregatedResult / vitest json blob (same shape) into
-// the compact summary the MCP server returns.
+// Normalize a parsed results blob into the compact summary the server returns.
+// Two near-identical shapes show up: jest's reporter-API AggregatedResult uses
+// `testFilePath` + a nested `testResults` array per suite; vitest's json reporter
+// (and jest's `--json` CLI) use `name` + `assertionResults`. Accept either.
 export function normalizeResults(r) {
   const failures = [];
   for (const suite of r.testResults ?? []) {
-    for (const a of suite.assertionResults ?? []) {
+    const assertions = suite.assertionResults ?? suite.testResults ?? [];
+    const file = suite.name ?? suite.testFilePath;
+    for (const a of assertions) {
       if (a.status === "failed") {
         failures.push({
           test: a.fullName || a.title,
-          file: suite.name,
+          file,
           message: (a.failureMessages ?? []).join("\n").slice(0, 2000),
         });
       }

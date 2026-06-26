@@ -68,6 +68,35 @@ test("normalizeResults: extracts only failures with file + message", () => {
   assert.equal(r.failures[1].test, "throws");
 });
 
+// Jest's reporter-API AggregatedResult nests per-test results under `testResults`
+// (not `assertionResults`) and names the file `testFilePath` (not `name`).
+test("normalizeResults: handles jest reporter-API shape", () => {
+  const r = normalizeResults({
+    numTotalTests: 2,
+    numPassedTests: 1,
+    numFailedTests: 1,
+    numFailedTestSuites: 1,
+    testResults: [
+      {
+        testFilePath: "/proj/a.test.js",
+        testResults: [
+          { status: "passed", title: "ok", fullName: "g ok" },
+          {
+            status: "failed",
+            title: "bad",
+            fullName: "g bad",
+            failureMessages: ["nope"],
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(r.failed, 1);
+  assert.deepEqual(r.failures, [
+    { test: "g bad", file: "/proj/a.test.js", message: "nope" },
+  ]);
+});
+
 test("normalizeResults: all-green run is ok with no failures", () => {
   const r = normalizeResults({
     numTotalTests: 2,
