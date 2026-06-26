@@ -1,0 +1,216 @@
+#!/usr/bin/env node
+// test-watch-mcp — pilot a jest/vitest watch process over a PTY from an MCP client.
+// One warm watch session per server process; the pty handle lives in memory, so
+// commands (run all / filter / failed) are just keystrokes written to the pty.
+import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import pty from "node-pty";
+import { z } from "zod";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const JEST_REPORTER = path.join(HERE, "jest-reporter.cjs");
+
+// --- single watch session state -------------------------------------------
+let session = null; // { proc, runner, cwd, resultsFile, log: string[] }
+
+const CR = "\r";
+const text = (s) => ({ content: [{ type: "text", text: s }] });
+
+function buildCommand(runner, resultsFile, extra) {
+  const args = extra ? ` ${extra}` : "";
+  if (runner === "jest") {
+    // `--reporters` is a greedy array flag — keep positional args before it, or jest
+    // parses them as extra reporter modules.
+    return `./node_modules/.bin/jest --watchAll${args} --reporters default --reporters ${JEST_REPORTER}`;
+  }
+  return `./node_modules/.bin/vitest --watch --reporter=default --reporter=json --outputFile=${resultsFile}${args}`;
+}
+
+function startSession({ runner, cwd, args }) {
+  const resultsFile = path.join(
+    os.tmpdir(),
+    `test-watch-mcp-${process.pid}.json`,
+  );
+  try {
+    fs.rmSync(resultsFile, { force: true });
+  } catch {
+    /* ignore */
+  }
+  const cmd = buildCommand(runner, resultsFile, args);
+  const proc = pty.spawn("/bin/sh", ["-c", cmd], {
+    name: "xterm-color",
+    cols: 120,
+    rows: 40,
+    cwd,
+    env: { ...process.env, TEST_WATCH_MCP_OUT: resultsFile, CI: "" },
+  });
+  const log = [];
+  proc.onData((d) => {
+    log.push(d);
+    if (log.length > 400) log.splice(0, log.length - 400);
+  });
+  proc.onExit(() => {
+    if (session && session.proc === proc) session = null;
+  });
+  session = { proc, runner, cwd, resultsFile, log };
+}
+
+// Read whichever reporter wrote results and normalize to a compact summary.
+function readResults() {
+  if (!session) return null;
+  let raw;
+  try {
+    raw = fs.readFileSync(session.resultsFile, "utf8");
+  } catch {
+    return null; // no run has completed yet
+  }
+  let r;
+  try {
+    r = JSON.parse(raw);
+  } catch {
+    return null; // mid-write
+  }
+  const failures = [];
+  for (const suite of r.testResults ?? []) {
+    for (const a of suite.assertionResults ?? []) {
+      if (a.status === "failed") {
+        failures.push({
+          test: a.fullName || a.title,
+          file: suite.name,
+          message: (a.failureMessages ?? []).join("\n").slice(0, 2000),
+        });
+      }
+    }
+  }
+  return {
+    total: r.numTotalTests ?? 0,
+    passed: r.numPassedTests ?? 0,
+    failed: r.numFailedTests ?? 0,
+    suitesFailed: r.numFailedTestSuites ?? 0,
+    ok: (r.numFailedTests ?? 0) === 0 && (r.numFailedTestSuites ?? 0) === 0,
+    failures,
+  };
+}
+
+function requireSession() {
+  if (!session) throw new Error("No watch session. Call start_watch first.");
+  return session;
+}
+
+// --- MCP server -------------------------------------------------------------
+const server = new McpServer({ name: "test-watch-mcp", version: "0.1.0" });
+
+server.registerTool(
+  "start_watch",
+  {
+    description:
+      "Start a warm jest/vitest watch process in the given project. Pays cold-start once; later run_* tools are instant keystrokes to the running process.",
+    inputSchema: {
+      runner: z.enum(["jest", "vitest"]),
+      cwd: z
+        .string()
+        .describe("Absolute path to the project/workspace to run tests in."),
+      args: z
+        .string()
+        .optional()
+        .describe(
+          "Extra CLI args appended to the runner (e.g. a path filter).",
+        ),
+    },
+  },
+  async ({ runner, cwd, args }) => {
+    if (session) session.proc.kill();
+    startSession({ runner, cwd, args });
+    return text(
+      `Started ${runner} watch in ${cwd}. Use get_results to read each run.`,
+    );
+  },
+);
+
+server.registerTool(
+  "run_all",
+  {
+    description: 'Rerun the entire suite (presses "a" in the watcher).',
+    inputSchema: {},
+  },
+  async () => {
+    requireSession().proc.write("a");
+    return text("Triggered: run all.");
+  },
+);
+
+server.registerTool(
+  "run_failed",
+  {
+    description: 'Rerun only previously failed tests (presses "f").',
+    inputSchema: {},
+  },
+  async () => {
+    requireSession().proc.write("f");
+    return text("Triggered: run failed.");
+  },
+);
+
+server.registerTool(
+  "run_filtered",
+  {
+    description:
+      "Rerun tests matching a pattern, by file path or by test name.",
+    inputSchema: {
+      pattern: z.string().describe("Regex/substring to filter by."),
+      by: z.enum(["path", "name"]).default("path"),
+    },
+  },
+  async ({ pattern, by }) => {
+    const s = requireSession();
+    s.proc.write(by === "name" ? "t" : "p");
+    s.proc.write(pattern + CR);
+    return text(`Triggered: filter by ${by} /${pattern}/.`);
+  },
+);
+
+server.registerTool(
+  "get_results",
+  {
+    description:
+      "Read the latest completed run: pass/fail counts and failing tests with messages.",
+    inputSchema: {},
+  },
+  async () => {
+    requireSession();
+    const res = readResults();
+    if (!res)
+      return text(
+        "No completed run yet — give the current run a moment, then retry.",
+      );
+    return text(JSON.stringify(res, null, 2));
+  },
+);
+
+server.registerTool(
+  "tail_log",
+  {
+    description: "Raw recent watcher output, for debugging the session.",
+    inputSchema: {},
+  },
+  async () =>
+    text(requireSession().log.join("").slice(-4000) || "(no output yet)"),
+);
+
+server.registerTool(
+  "stop_watch",
+  { description: "Stop the watch process.", inputSchema: {} },
+  async () => {
+    if (!session) return text("No session running.");
+    session.proc.kill();
+    session = null;
+    return text("Stopped.");
+  },
+);
+
+const transport = new StdioServerTransport();
+await server.connect(transport);
