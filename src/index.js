@@ -10,6 +10,7 @@ import pty from "node-pty";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { buildCommand, normalizeResults } from "./core.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JEST_REPORTER = path.join(HERE, "jest-reporter.cjs");
@@ -40,16 +41,6 @@ function markTriggered() {
   session.triggeredMtime = resultsMtime();
 }
 
-function buildCommand(runner, resultsFile, extra) {
-  const args = extra ? ` ${extra}` : "";
-  if (runner === "jest") {
-    // `--reporters` is a greedy array flag — keep positional args before it, or jest
-    // parses them as extra reporter modules.
-    return `./node_modules/.bin/jest --watchAll${args} --reporters default --reporters ${JEST_REPORTER}`;
-  }
-  return `./node_modules/.bin/vitest --watch --reporter=default --reporter=json --outputFile=${resultsFile}${args}`;
-}
-
 function startSession({ runner, cwd, args }) {
   const resultsFile = path.join(
     os.tmpdir(),
@@ -60,7 +51,7 @@ function startSession({ runner, cwd, args }) {
   } catch {
     /* ignore */
   }
-  const cmd = buildCommand(runner, resultsFile, args);
+  const cmd = buildCommand(runner, resultsFile, JEST_REPORTER, args);
   const proc = pty.spawn("/bin/sh", ["-c", cmd], {
     name: "xterm-color",
     cols: 120,
@@ -89,32 +80,11 @@ function readResults() {
   } catch {
     return null; // no run has completed yet
   }
-  let r;
   try {
-    r = JSON.parse(raw);
+    return normalizeResults(JSON.parse(raw));
   } catch {
     return null; // mid-write
   }
-  const failures = [];
-  for (const suite of r.testResults ?? []) {
-    for (const a of suite.assertionResults ?? []) {
-      if (a.status === "failed") {
-        failures.push({
-          test: a.fullName || a.title,
-          file: suite.name,
-          message: (a.failureMessages ?? []).join("\n").slice(0, 2000),
-        });
-      }
-    }
-  }
-  return {
-    total: r.numTotalTests ?? 0,
-    passed: r.numPassedTests ?? 0,
-    failed: r.numFailedTests ?? 0,
-    suitesFailed: r.numFailedTestSuites ?? 0,
-    ok: (r.numFailedTests ?? 0) === 0 && (r.numFailedTestSuites ?? 0) === 0,
-    failures,
-  };
 }
 
 function requireSession() {
