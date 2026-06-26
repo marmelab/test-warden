@@ -15,10 +15,30 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JEST_REPORTER = path.join(HERE, "jest-reporter.cjs");
 
 // --- single watch session state -------------------------------------------
-let session = null; // { proc, runner, cwd, resultsFile, log: string[] }
+let session = null; // { proc, runner, cwd, resultsFile, log: string[], triggeredMtime }
 
 const CR = "\r";
 const text = (s) => ({ content: [{ type: "text", text: s }] });
+
+// mtime of the results file, or 0 if it doesn't exist yet. Both jest's reporter
+// and vitest's --outputFile rewrite the file on each run, so a rising mtime is
+// the "a new run finished" edge.
+// ponytail: relies on sub-second mtime (ext4/xfs/apfs have it); on a 1s-granularity
+// FS a rerun finishing within the same second as the trigger reads as stale. Move
+// to a run counter written by the reporter if that ever bites.
+function resultsMtime() {
+  try {
+    return fs.statSync(session.resultsFile).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+// Record the file's mtime at the instant a run is triggered, so get_results can
+// tell the freshly-finished run apart from the previous run's leftover JSON.
+function markTriggered() {
+  session.triggeredMtime = resultsMtime();
+}
 
 function buildCommand(runner, resultsFile, extra) {
   const args = extra ? ` ${extra}` : "";
@@ -56,7 +76,8 @@ function startSession({ runner, cwd, args }) {
   proc.onExit(() => {
     if (session && session.proc === proc) session = null;
   });
-  session = { proc, runner, cwd, resultsFile, log };
+  // File was just deleted (mtime 0), so the watcher's initial run counts as fresh.
+  session = { proc, runner, cwd, resultsFile, log, triggeredMtime: 0 };
 }
 
 // Read whichever reporter wrote results and normalize to a compact summary.
@@ -138,7 +159,9 @@ server.registerTool(
     inputSchema: {},
   },
   async () => {
-    requireSession().proc.write("a");
+    const s = requireSession();
+    markTriggered();
+    s.proc.write("a");
     return text("Triggered: run all.");
   },
 );
@@ -150,7 +173,9 @@ server.registerTool(
     inputSchema: {},
   },
   async () => {
-    requireSession().proc.write("f");
+    const s = requireSession();
+    markTriggered();
+    s.proc.write("f");
     return text("Triggered: run failed.");
   },
 );
@@ -167,6 +192,7 @@ server.registerTool(
   },
   async ({ pattern, by }) => {
     const s = requireSession();
+    markTriggered();
     s.proc.write(by === "name" ? "t" : "p");
     s.proc.write(pattern + CR);
     return text(`Triggered: filter by ${by} /${pattern}/.`);
@@ -182,11 +208,16 @@ server.registerTool(
   },
   async () => {
     requireSession();
+    // The previous run's JSON is still on disk; only trust it once the file's
+    // mtime has advanced past the moment the current run was triggered.
+    if (resultsMtime() <= session.triggeredMtime)
+      return text(
+        JSON.stringify({ pending: true }, null, 2) +
+          "\n// Run still in progress — give it a moment, then retry.",
+      );
     const res = readResults();
     if (!res)
-      return text(
-        "No completed run yet — give the current run a moment, then retry.",
-      );
+      return text(JSON.stringify({ pending: true }, null, 2) + "\n// mid-write");
     return text(JSON.stringify(res, null, 2));
   },
 );
