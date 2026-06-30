@@ -7,7 +7,11 @@ beforeEach(() => {
 
 describe("add", () => {
   test("adds a todo with an incrementing id", () => {
-    expect(todos.add("buy milk")).toEqual({ id: 1, title: "buy milk", done: false });
+    expect(todos.add("buy milk")).toEqual({
+      id: 1,
+      title: "buy milk",
+      done: false,
+    });
     expect(todos.add("walk dog").id).toBe(2);
   });
 

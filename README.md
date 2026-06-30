@@ -36,6 +36,34 @@ Requires Node ≥ 20. `node-pty` builds a native addon on install (needs a C++ t
 
 One warm session per server process. `get_results` reads jest's `AggregatedResult` (via a bundled reporter) and vitest's `--reporter=json` — normalized to the same shape.
 
+## Failure notifications (optional)
+
+MCP servers can't push to the agent on their own — the agent only reacts to a tool
+return or a client-side hook. So failures are surfaced via a bundled `PostToolUse`
+hook: after any tool call, it peeks at the latest run and, if a *new* run is failing,
+injects a one-line note into the agent's context (non-blocking — the agent decides).
+Add to your project's `.claude/settings.json`:
+
+```jsonc
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node node_modules/test-watch-mcp/hooks/notify-on-fail.mjs"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Fires once per failing run (deduped by results-file mtime); silent while green.
+
 ## Limitations
 
 - PTY uses `node-pty`; Windows support follows node-pty's (works, but less exercised here).
