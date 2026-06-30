@@ -55,7 +55,7 @@ test("notifies once on a failing run, then stays silent (deduped by mtime)", () 
   );
 
   const first = run();
-  assert.match(first, /1 test\(s\) failing/);
+  assert.match(first, /Failed tests:/);
   assert.match(first, /boom/);
   assert.match(first, /get_results/); // points the agent at the full failure detail
 
@@ -122,7 +122,7 @@ test("two workspaces: a passing one doesn't mask the other's failure", () => {
   }, 1e12);
 
   const out = runIn();
-  assert.match(out, /1 test\(s\) failing/);
+  assert.match(out, /Failed tests:/);
   assert.match(out, /\/api\/x\.test\.ts/); // identifies the failing workspace
   assert.equal(runIn().trim(), ""); // deduped on second call
   fs.rmSync(tmp, { recursive: true, force: true });

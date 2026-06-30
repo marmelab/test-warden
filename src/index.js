@@ -184,7 +184,7 @@ server.registerTool(
   "start_watch",
   {
     description:
-      "Start a warm jest/vitest watch process in the given project. Pays cold-start once; later run_* tools are instant keystrokes to the running process. The runner is auto-detected from cwd's package.json — only pass it to override.",
+      "Start a jest/vitest watch in the given project. Once started, the watch runs continuously and automatically reruns every test impacted by any unstaged change. The runner is auto-detected from cwd's package.json — only pass it to override.",
     inputSchema: {
       cwd: z
         .string()
@@ -269,28 +269,30 @@ const cwdArg = {
 server.registerTool(
   "run_all",
   {
-    description: 'Rerun the entire suite (presses "a" in the watcher).',
+    description:
+      "Trigger a full-suite rerun (the watch otherwise reruns only change-impacted tests). Returns immediately — call get_results to read the outcome.",
     inputSchema: cwdArg,
   },
   async ({ cwd }) => {
     const s = pick(cwd);
     markTriggered(s);
-    s.proc.write("a");
-    return text(`Triggered: run all in ${s.cwd}.`);
+    s.proc.write("a"); // "a" = run all, in the runner's watch UI
+    return text(`Triggered: run all in ${s.cwd}. Call get_results to read the outcome.`);
   },
 );
 
 server.registerTool(
   "run_failed",
   {
-    description: 'Rerun only previously failed tests (presses "f").',
+    description:
+      "Trigger a rerun of only the tests that failed in the last run — faster than the full suite while iterating on a fix. Returns immediately — call get_results to read the outcome.",
     inputSchema: cwdArg,
   },
   async ({ cwd }) => {
     const s = pick(cwd);
     markTriggered(s);
-    s.proc.write("f");
-    return text(`Triggered: run failed in ${s.cwd}.`);
+    s.proc.write("f"); // "f" = run only failed, in the runner's watch UI
+    return text(`Triggered: run failed in ${s.cwd}. Call get_results to read the outcome.`);
   },
 );
 
@@ -298,19 +300,22 @@ server.registerTool(
   "run_filtered",
   {
     description:
-      "Rerun tests matching a pattern, by file path or by test name.",
+      "Trigger a rerun of only the tests matching a pattern (by file path or test name) — use to focus on one area. Returns immediately — call get_results to read the outcome.",
     inputSchema: {
       pattern: z.string().describe("Regex/substring to filter by."),
-      by: z.enum(["path", "name"]).default("path"),
+      by: z
+        .enum(["path", "name"])
+        .default("path")
+        .describe("Match the pattern against the test file path (default) or the test name."),
       ...cwdArg,
     },
   },
   async ({ pattern, by, cwd }) => {
     const s = pick(cwd);
     markTriggered(s);
-    s.proc.write(by === "name" ? "t" : "p");
+    s.proc.write(by === "name" ? "t" : "p"); // "t" = filter by test name, "p" = by path
     s.proc.write(pattern + CR);
-    return text(`Triggered: filter by ${by} /${pattern}/ in ${s.cwd}.`);
+    return text(`Triggered: filter by ${by} /${pattern}/ in ${s.cwd}. Call get_results to read the outcome.`);
   },
 );
 
@@ -318,7 +323,7 @@ server.registerTool(
   "get_results",
   {
     description:
-      "Read the latest completed run: pass/fail counts and failing tests with messages.",
+      "Read the latest run's results: pass/fail counts and failing tests with messages. Waits for an in-progress run to finish, so call it right after editing code (the watch auto-runs impacted tests) or after a run_* trigger. Requires start_watch first.",
     inputSchema: cwdArg,
   },
   async ({ cwd }) => {
@@ -346,7 +351,8 @@ server.registerTool(
 server.registerTool(
   "tail_log",
   {
-    description: "Raw recent watcher output, for debugging the session.",
+    description:
+      "Raw recent watcher output — for debugging the session, e.g. when get_results stays pending or the watcher seems stuck.",
     inputSchema: cwdArg,
   },
   async ({ cwd }) =>
@@ -356,7 +362,7 @@ server.registerTool(
 server.registerTool(
   "stop_watch",
   {
-    description: "Stop a watch process, or all of them when cwd is omitted.",
+    description: "Stop the continuous watch for a project, or all watches when cwd is omitted.",
     inputSchema: cwdArg,
   },
   async ({ cwd }) => {

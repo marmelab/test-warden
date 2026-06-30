@@ -55,17 +55,13 @@ for (const { p, m, slug } of resultFiles()) {
   }
   if (res.ok) continue; // green — nothing to say
   const names = res.failures.map((f) => `  • ${f.test} (${f.file})`).join("\n");
-  notes.push(
-    `⚠️ test-warden: ${res.failed} test(s) failing (${res.suitesFailed} suite(s)).\n${names}`,
-  );
+  notes.push(`Failed tests:\n${names}`);
 }
 
 fs.writeFileSync(STATE, JSON.stringify(next));
 if (notes.length)
   emitContext(
-    notes.join("\n") +
-      "\n→ That's only the failing test names. For the actual assertion errors and " +
-      "stack traces, call the test-warden `get_results` tool before fixing — don't " +
-      "infer the cause from the names above.",
+    `${notes.join("\n")}
+Call test-warden \`get_results\` tool to retrieve more details on failing tests`,
   );
 process.exit(0);
