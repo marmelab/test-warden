@@ -1,11 +1,5 @@
 {
   "mcpServers": {
-    "test-watch": {
-      "command": "node",
-      "args": [
-        "src/index.js"
-      ]
-    },
     "test-warden": {
       "command": "npx",
       "args": [

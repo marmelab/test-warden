@@ -6,7 +6,6 @@
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -17,6 +16,7 @@ import {
   resolveBin,
   scriptEnv,
   normalizeResults,
+  slugFor,
 } from "./core.js";
 
 // `test-warden init` wires the server + hook into the current project, then exits.
@@ -26,8 +26,23 @@ if (process.argv[2] === "init") {
   process.exit(0);
 }
 
-// Loaded only when actually running the server — `init` must not need the native addon.
-const pty = (await import("node-pty")).default;
+// node-pty is a native addon with NO Linux prebuilt binary — it must be compiled
+// (pnpm approve-builds / npm rebuild). Import it lazily, on first start_watch, not at
+// module load: an unbuilt addon then surfaces as a clear error from the tool call
+// instead of killing the server before the MCP handshake (which a client shows as a
+// permanent "Connecting…"). `init` never reaches this, so it stays addon-free.
+let ptyMod;
+async function getPty() {
+  try {
+    return (ptyMod ??= (await import("node-pty")).default);
+  } catch (e) {
+    throw new Error(
+      "node-pty failed to load — it has no Linux prebuild and must be compiled. Run " +
+        "`pnpm approve-builds` (or `npm rebuild node-pty`) where test-warden is " +
+        `installed, then restart. Original error: ${e.message}`,
+    );
+  }
+}
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JEST_REPORTER = path.join(HERE, "jest-reporter.cjs");
@@ -42,6 +57,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Resolve which session a command targets: explicit cwd, else the only one.
 function pick(cwd) {
   if (cwd) {
+    try {
+      cwd = fs.realpathSync(cwd); // match start_watch's canonical key
+    } catch {
+      /* missing dir — get() misses below and we throw the clear error */
+    }
     const s = sessions.get(cwd);
     if (s) return s;
     throw new Error(
@@ -76,9 +96,36 @@ function markTriggered(s) {
   s.triggeredMtime = resultsMtime(s);
 }
 
-function startSession({ runner, bin, cwd, args, env }) {
+// Cross-process guard: is a *different*, still-alive test-warden already watching
+// this project? The .live marker holds the owning server's pid. A second file-watch
+// on the same tree is a real perf hit — it can grind the machine to a halt — so we
+// refuse rather than spawn a duplicate. A dead pid (crashed server) or our own pid
+// means it's free. Returns the owning pid, or 0 if free.
+// ponytail: check-then-spawn isn't atomic — two servers starting in the same
+// millisecond could both win. Realistic triggers (config, two editor windows) are
+// human-paced, so a plain check suffices; switch to an O_EXCL lockfile only if
+// simultaneous starts ever actually collide.
+function watchedElsewhere(cwd) {
+  const liveFile = path.join(os.tmpdir(), `test-warden-${slugFor(cwd)}.live`);
+  let pid;
+  try {
+    pid = Number(fs.readFileSync(liveFile, "utf8"));
+  } catch {
+    return 0; // no marker — free
+  }
+  if (pid === process.pid) return 0; // our own (restart)
+  try {
+    process.kill(pid, 0); // throws if the owner is gone
+    return pid; // alive & not us → owned elsewhere
+  } catch {
+    return 0; // crashed owner — free (start_watch overwrites the marker)
+  }
+}
+
+async function startSession({ runner, bin, cwd, args, env }) {
+  const pty = await getPty(); // native addon; throws a clear message if unbuilt
   // Per-cwd results file so concurrent watchers don't clobber each other's JSON.
-  const slug = crypto.createHash("sha1").update(cwd).digest("hex").slice(0, 8);
+  const slug = slugFor(cwd);
   const resultsFile = path.join(
     os.tmpdir(),
     `test-warden-${process.pid}-${slug}.json`,
@@ -173,6 +220,13 @@ server.registerTool(
     },
   },
   async ({ runner, cwd, args, env }) => {
+    // Canonicalize first: the same dir spelled two ways (symlink, trailing slash,
+    // `..`) must be one session/one watcher, not two.
+    try {
+      cwd = fs.realpathSync(cwd);
+    } catch {
+      /* missing dir — detectRunner/resolveBin below give the clear error */
+    }
     let resolved = runner;
     if (!resolved) {
       try {
@@ -191,8 +245,23 @@ server.registerTool(
         `${resolved} is not installed in ${cwd} (no node_modules/.bin/${resolved}). Install deps first.`,
       );
     const existing = sessions.get(cwd); // restart only this cwd's watcher
-    if (existing) existing.proc.kill();
-    startSession({ runner: resolved, bin, cwd, args, env });
+    if (existing) {
+      existing.proc.kill();
+    } else {
+      // No local session, but another server process might already watch this dir.
+      const owner = watchedElsewhere(cwd);
+      if (owner)
+        return text(
+          `${cwd} is already watched by another test-warden (pid ${owner}). ` +
+            `Not starting a second watcher — a duplicate file-watch on the same ` +
+            `tree can grind the machine to a halt. Reuse that instance, or stop it first.`,
+        );
+    }
+    try {
+      await startSession({ runner: resolved, bin, cwd, args, env });
+    } catch (e) {
+      return text(e.message); // e.g. node-pty not compiled — actionable, not a hang
+    }
     return text(
       `Started ${resolved} watch in ${cwd}. ${sessions.size} session(s) active. ` +
         `Use get_results (pass cwd when more than one) to read each run.`,

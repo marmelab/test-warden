@@ -9,7 +9,19 @@ import {
   resolveBin,
   parseScriptEnv,
   normalizeResults,
+  slugFor,
 } from "../src/core.js";
+
+test("slugFor: same dir via trailing slash or symlink yields one slug", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tw-slug-"));
+  const link = `${dir}-link`;
+  fs.symlinkSync(dir, link);
+  const base = slugFor(dir);
+  assert.equal(slugFor(`${dir}/`), base); // trailing slash collapses
+  assert.equal(slugFor(link), base); // symlink resolves to the same real path
+  fs.rmSync(link, { force: true });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 test("parseScriptEnv: pulls leading env assignments off the test script", () => {
   assert.deepEqual(parseScriptEnv("TZ=UTC jest"), { TZ: "UTC" });

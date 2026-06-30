@@ -5,8 +5,7 @@
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
-import { detectRunner } from "../src/core.js";
+import { detectRunner, slugFor } from "../src/core.js";
 import { emitContext } from "./emit.mjs";
 
 const DIR = process.env.TEST_WATCH_MCP_TMP || os.tmpdir();
@@ -15,8 +14,7 @@ const DIR = process.env.TEST_WATCH_MCP_TMP || os.tmpdir();
 // on start and removes it on exit; a leftover from a crashed server has a dead pid.
 // Re-checking this every edit (instead of nudging once) is what makes it reliable.
 function isWatched(cwd) {
-  const slug = crypto.createHash("sha1").update(cwd).digest("hex").slice(0, 8);
-  const live = path.join(DIR, `test-warden-${slug}.live`);
+  const live = path.join(DIR, `test-warden-${slugFor(cwd)}.live`);
   let pid;
   try {
     pid = Number(fs.readFileSync(live, "utf8"));
