@@ -41,8 +41,9 @@ One warm session per server process. `get_results` reads jest's `AggregatedResul
 MCP servers can't push to the agent on their own — the agent only reacts to a tool
 return or a client-side hook. So failures are surfaced via a bundled `PostToolUse`
 hook: after any tool call, it peeks at the latest run and, if a *new* run is failing,
-injects a one-line note into the agent's context (non-blocking — the agent decides).
-Add to your project's `.claude/settings.json`:
+prints a one-line note to stdout (non-blocking — the agent decides). Plain stdout is
+the lowest common denominator, so this works with any agent whose hook system
+captures hook output. For Claude Code, add to your project's `.claude/settings.json`:
 
 ```jsonc
 {

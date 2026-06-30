@@ -49,10 +49,8 @@ test("notifies once on a failing run, then stays silent (deduped by mtime)", () 
   );
 
   const first = run();
-  const parsed = JSON.parse(first);
-  assert.equal(parsed.hookSpecificOutput.hookEventName, "PostToolUse");
-  assert.match(parsed.hookSpecificOutput.additionalContext, /1 test\(s\) failing/);
-  assert.match(parsed.hookSpecificOutput.additionalContext, /boom/);
+  assert.match(first, /1 test\(s\) failing/);
+  assert.match(first, /boom/);
 
   // Same run (same mtime) → no repeat notification.
   assert.equal(run().trim(), "");

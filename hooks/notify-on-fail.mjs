@@ -24,15 +24,11 @@ function newestResults() {
   return best;
 }
 
-const emit = (text) =>
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PostToolUse",
-        additionalContext: text,
-      },
-    }),
-  );
+// Plain text to stdout — the lowest common denominator every agent's command-hook
+// system can capture. Non-blocking (exit 0). Note: Claude Code shows stdout in the
+// transcript but only feeds stderr+exit-2 to the model, so on Claude this note is
+// visible to the user, not auto-injected into context.
+const emit = (text) => process.stdout.write(text + "\n");
 
 const cur = newestResults();
 if (!cur) process.exit(0); // no watch session
