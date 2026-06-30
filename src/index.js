@@ -82,6 +82,10 @@ function startSession({ runner, bin, cwd, args, env }) {
     os.tmpdir(),
     `test-warden-${process.pid}-${slug}.json`,
   );
+  // Liveness marker for the nudge hook: present + pid-alive ⇒ this cwd is watched.
+  // Unlike resultsFile (deleted here, reappears only after the first run), it exists
+  // for the whole session, so the hook never false-nudges a freshly-started watch.
+  const liveFile = path.join(os.tmpdir(), `test-warden-${slug}.live`);
   try {
     fs.rmSync(resultsFile, { force: true });
   } catch {
@@ -108,9 +112,15 @@ function startSession({ runner, bin, cwd, args, env }) {
     log.push(d);
     if (log.length > 400) log.splice(0, log.length - 400);
   });
-  const s = { proc, runner, cwd, resultsFile, log, triggeredMtime: 0 };
+  fs.writeFileSync(liveFile, String(process.pid));
+  const s = { proc, runner, cwd, resultsFile, liveFile, log, triggeredMtime: 0 };
   proc.onExit(() => {
-    if (sessions.get(cwd) === s) sessions.delete(cwd);
+    // Guarded: a restart (kill old → start new) writes the new marker before the
+    // old proc's exit fires, so only the still-current session clears it.
+    if (sessions.get(cwd) === s) {
+      sessions.delete(cwd);
+      fs.rmSync(liveFile, { force: true });
+    }
   });
   // File was just deleted (mtime 0), so the watcher's initial run counts as fresh.
   sessions.set(cwd, s);

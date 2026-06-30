@@ -38,7 +38,13 @@ const run = (tmp, file) =>
     encoding: "utf8",
   });
 
-test("nudges to start_watch for the edited package, once", () => {
+const liveMarker = (tmp, cwd) =>
+  path.join(
+    tmp,
+    `test-warden-${crypto.createHash("sha1").update(cwd).digest("hex").slice(0, 8)}.live`,
+  );
+
+test("nudges to start_watch for the edited package, and keeps nudging until watched", () => {
   const { apiFile } = makeRepo();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-nudge-tmp-"));
 
@@ -48,8 +54,8 @@ test("nudges to start_watch for the edited package, once", () => {
   assert.match(ctx, /packages\/api/);
   assert.match(ctx, /vitest/);
 
-  // Second edit in the same package → deduped, no output.
-  assert.equal(run(tmp, apiFile).trim(), "");
+  // Still not watched → a later edit nudges again (the reliability fix).
+  assert.match(run(tmp, apiFile), /start_watch/);
 });
 
 test("silent for a file outside any jest/vitest package", () => {
@@ -58,13 +64,23 @@ test("silent for a file outside any jest/vitest package", () => {
   assert.equal(run(tmp, looseFile).trim(), "");
 });
 
-test("silent when a watcher for that package already exists", () => {
+test("silent when a live watcher marker exists for that package", () => {
   const { root, apiFile } = makeRepo();
   const cwd = path.join(root, "packages", "api");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-nudge-tmp-"));
-  // Simulate an active session: its results file is named by a hash of cwd.
-  const slug = crypto.createHash("sha1").update(cwd).digest("hex").slice(0, 8);
-  fs.writeFileSync(path.join(tmp, `test-warden-999-${slug}.json`), "{}");
+  // Live session: marker holds an alive pid (this test process).
+  fs.writeFileSync(liveMarker(tmp, cwd), String(process.pid));
 
   assert.equal(run(tmp, apiFile).trim(), "");
+});
+
+test("nudges again when the marker's pid is dead (crashed server)", () => {
+  const { root, apiFile } = makeRepo();
+  const cwd = path.join(root, "packages", "api");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-nudge-tmp-"));
+  const marker = liveMarker(tmp, cwd);
+  fs.writeFileSync(marker, "2147483646"); // pid almost certainly not running
+
+  assert.match(run(tmp, apiFile), /start_watch/);
+  assert.equal(fs.existsSync(marker), false); // stale marker reaped
 });
