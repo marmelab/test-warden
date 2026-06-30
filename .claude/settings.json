@@ -9,6 +9,15 @@
             "command": "node hooks/notify-on-fail.mjs"
           }
         ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /home/thiery/dev/test-warden/hooks/notify-on-fail.mjs"
+          }
+        ]
       }
     ]
   }

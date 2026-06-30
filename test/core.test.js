@@ -1,21 +1,63 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildCommand, normalizeResults } from "../src/core.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  buildCommand,
+  detectRunner,
+  resolveBin,
+  normalizeResults,
+} from "../src/core.js";
 
 test("buildCommand: jest keeps positional args before the greedy --reporters", () => {
-  const cmd = buildCommand("jest", "/tmp/out.json", "/r.cjs", "src/foo");
+  const cmd = buildCommand("jest", "/bin/jest", "/tmp/out.json", "/r.cjs", "src/foo");
   // args must sit before --reporters, else jest reads them as reporter modules.
   assert.match(cmd, /--watchAll src\/foo --reporters default --reporters \/r\.cjs$/);
 });
 
 test("buildCommand: jest without extra args", () => {
-  const cmd = buildCommand("jest", "/tmp/out.json", "/r.cjs");
-  assert.match(cmd, /jest --watchAll --reporters default --reporters \/r\.cjs$/);
+  const cmd = buildCommand("jest", "/bin/jest", "/tmp/out.json", "/r.cjs");
+  assert.match(cmd, /jest" --watchAll --reporters default --reporters \/r\.cjs$/);
 });
 
 test("buildCommand: vitest wires json output file and appends args", () => {
-  const cmd = buildCommand("vitest", "/tmp/out.json", "/r.cjs", "src/foo");
+  const cmd = buildCommand("vitest", "/bin/vitest", "/tmp/out.json", "/r.cjs", "src/foo");
   assert.match(cmd, /--reporter=json --outputFile=\/tmp\/out\.json src\/foo$/);
+});
+
+test("detectRunner: from deps, config files, neither, and ambiguous", () => {
+  const mk = (setup) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twm-detect-"));
+    setup(dir);
+    return dir;
+  };
+  const pkg = (dir, obj) =>
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(obj));
+
+  assert.equal(detectRunner(mk((d) => pkg(d, { devDependencies: { vitest: "^1" } }))), "vitest");
+  assert.equal(detectRunner(mk((d) => pkg(d, { devDependencies: { jest: "^29" } }))), "jest");
+  // config file alone, no package.json dep
+  assert.equal(detectRunner(mk((d) => fs.writeFileSync(path.join(d, "vitest.config.ts"), ""))), "vitest");
+  // jest config under the package.json key
+  assert.equal(detectRunner(mk((d) => pkg(d, { jest: {} }))), "jest");
+  // neither → null
+  assert.equal(detectRunner(mk((d) => pkg(d, {}))), null);
+  assert.equal(detectRunner(mk(() => {})), null); // no package.json at all
+  // both → throws so the caller asks for an explicit runner
+  assert.throws(() => detectRunner(mk((d) => pkg(d, { devDependencies: { jest: "^29", vitest: "^1" } }))), /both/i);
+});
+
+test("resolveBin: walks up to a hoisted node_modules/.bin", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "twm-bin-"));
+  const bin = path.join(root, "node_modules", ".bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "vitest"), "");
+  const pkgDir = path.join(root, "packages", "app");
+  fs.mkdirSync(pkgDir, { recursive: true });
+
+  assert.equal(resolveBin(pkgDir, "vitest"), path.join(bin, "vitest")); // found at root
+  assert.equal(resolveBin(pkgDir, "jest"), null); // absent everywhere up the tree
 });
 
 // jest's AggregatedResult and vitest's json reporter emit the same shape; the

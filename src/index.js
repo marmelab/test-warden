@@ -6,11 +6,25 @@ import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import pty from "node-pty";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { buildCommand, normalizeResults } from "./core.js";
+import {
+  buildCommand,
+  detectRunner,
+  resolveBin,
+  normalizeResults,
+} from "./core.js";
+
+// `test-warden init` wires the server + hook into the current project, then exits.
+if (process.argv[2] === "init") {
+  const { run } = await import("./init.js");
+  run();
+  process.exit(0);
+}
+
+// Loaded only when actually running the server — `init` must not need the native addon.
+const pty = (await import("node-pty")).default;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JEST_REPORTER = path.join(HERE, "jest-reporter.cjs");
@@ -41,14 +55,14 @@ function markTriggered() {
   session.triggeredMtime = resultsMtime();
 }
 
-function startSession({ runner, cwd, args }) {
+function startSession({ runner, bin, cwd, args }) {
   const resultsFile = path.join(os.tmpdir(), `test-warden-${process.pid}.json`);
   try {
     fs.rmSync(resultsFile, { force: true });
   } catch {
     /* ignore */
   }
-  const cmd = buildCommand(runner, resultsFile, JEST_REPORTER, args);
+  const cmd = buildCommand(runner, bin, resultsFile, JEST_REPORTER, args);
   const proc = pty.spawn("/bin/sh", ["-c", cmd], {
     name: "xterm-color",
     cols: 120,
@@ -96,12 +110,15 @@ server.registerTool(
   "start_watch",
   {
     description:
-      "Start a warm jest/vitest watch process in the given project. Pays cold-start once; later run_* tools are instant keystrokes to the running process.",
+      "Start a warm jest/vitest watch process in the given project. Pays cold-start once; later run_* tools are instant keystrokes to the running process. The runner is auto-detected from cwd's package.json — only pass it to override.",
     inputSchema: {
-      runner: z.enum(["jest", "vitest"]),
       cwd: z
         .string()
         .describe("Absolute path to the project/workspace to run tests in."),
+      runner: z
+        .enum(["jest", "vitest"])
+        .optional()
+        .describe("Override auto-detection (e.g. when a package has both)."),
       args: z
         .string()
         .optional()
@@ -111,10 +128,27 @@ server.registerTool(
     },
   },
   async ({ runner, cwd, args }) => {
+    let resolved = runner;
+    if (!resolved) {
+      try {
+        resolved = detectRunner(cwd);
+      } catch (e) {
+        return text(e.message); // both detected — ask the agent to specify
+      }
+      if (!resolved)
+        return text(
+          `No jest or vitest found in ${cwd}. This server only drives those two runners.`,
+        );
+    }
+    const bin = resolveBin(cwd, resolved);
+    if (!bin)
+      return text(
+        `${resolved} is not installed in ${cwd} (no node_modules/.bin/${resolved}). Install deps first.`,
+      );
     if (session) session.proc.kill();
-    startSession({ runner, cwd, args });
+    startSession({ runner: resolved, bin, cwd, args });
     return text(
-      `Started ${runner} watch in ${cwd}. Use get_results to read each run.`,
+      `Started ${resolved} watch in ${cwd}. Use get_results to read each run.`,
     );
   },
 );
