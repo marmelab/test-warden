@@ -39,16 +39,16 @@ Or configure manually:
 | Tool           | Args                                        | Does                                                             |
 | -------------- | ------------------------------------------- | ---------------------------------------------------------------- |
 | `start_watch`  | `cwd`, `runner?` (`jest`\|`vitest`), `args?` | Launch a warm watch session in `cwd`. Runner auto-detected from `cwd`'s `package.json`; pass `runner` only to override. |
-| `run_all`      | —                                           | Rerun the whole suite.                                           |
-| `run_failed`   | —                                           | Rerun only previously failed tests.                              |
-| `run_filtered` | `pattern`, `by` (`path`\|`name`)            | Rerun tests matching a filter.                                   |
-| `get_results`  | —                                           | Latest run as JSON: `{ total, passed, failed, ok, failures[] }`. |
-| `tail_log`     | —                                           | Recent raw watcher output (debugging).                           |
-| `stop_watch`   | —                                           | Stop the session.                                                |
+| `run_all`      | `cwd?`                                       | Rerun the whole suite.                                           |
+| `run_failed`   | `cwd?`                                       | Rerun only previously failed tests.                             |
+| `run_filtered` | `pattern`, `by` (`path`\|`name`), `cwd?`     | Rerun tests matching a filter.                                   |
+| `get_results`  | `cwd?`                                       | Latest run as JSON: `{ total, passed, failed, ok, failures[] }`. |
+| `tail_log`     | `cwd?`                                       | Recent raw watcher output (debugging).                           |
+| `stop_watch`   | `cwd?`                                       | Stop one session, or all when `cwd` is omitted.                 |
 
-One warm session per server process. `get_results` reads jest's `AggregatedResult` (via a bundled reporter) and vitest's `--reporter=json` — normalized to the same shape.
+`get_results` reads jest's `AggregatedResult` (via a bundled reporter) and vitest's `--reporter=json` — normalized to the same shape.
 
-**Monorepos:** point `cwd` at the specific package — the runner is detected per-`cwd`, so packages on different runners each work, and the binary is resolved from `node_modules/.bin` walking up to the workspace root (so hoisted installs resolve). One warm session at a time, so switching packages restarts the watcher.
+**Monorepos:** one warm session per `cwd`, so you can watch several at once (e.g. `mobile` on jest and `api` on vitest concurrently). The runner is detected per-`cwd`, and the binary is resolved from `node_modules/.bin` walking up to the workspace root (so hoisted installs resolve). The `cwd` arg on the other tools picks which session — omit it when only one is running. The failure hook reports each workspace independently, so a green run in one never hides a red run in another.
 
 ## Failure notifications (optional)
 

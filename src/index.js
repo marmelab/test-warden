@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// test-warden — pilot a jest/vitest watch process over a PTY from an MCP client.
-// One warm watch session per server process; the pty handle lives in memory, so
-// commands (run all / filter / failed) are just keystrokes written to the pty.
+// test-warden — pilot jest/vitest watch processes over a PTY from an MCP client.
+// One warm watch session per project dir (so a monorepo can watch several at once);
+// the pty handles live in memory, so commands (run all / filter / failed) are just
+// keystrokes written to the pty.
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -29,11 +31,28 @@ const pty = (await import("node-pty")).default;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JEST_REPORTER = path.join(HERE, "jest-reporter.cjs");
 
-// --- single watch session state -------------------------------------------
-let session = null; // { proc, runner, cwd, resultsFile, log: string[], triggeredMtime }
+// --- watch sessions, keyed by project dir ----------------------------------
+const sessions = new Map(); // cwd -> { proc, runner, cwd, resultsFile, log, triggeredMtime }
 
 const CR = "\r";
 const text = (s) => ({ content: [{ type: "text", text: s }] });
+
+// Resolve which session a command targets: explicit cwd, else the only one.
+function pick(cwd) {
+  if (cwd) {
+    const s = sessions.get(cwd);
+    if (s) return s;
+    throw new Error(
+      `No watch session for ${cwd}. Active: ${[...sessions.keys()].join(", ") || "none"}.`,
+    );
+  }
+  if (sessions.size === 1) return [...sessions.values()][0];
+  if (sessions.size === 0)
+    throw new Error("No watch session. Call start_watch first.");
+  throw new Error(
+    `Multiple watch sessions active — pass cwd. Active: ${[...sessions.keys()].join(", ")}.`,
+  );
+}
 
 // mtime of the results file, or 0 if it doesn't exist yet. Both jest's reporter
 // and vitest's --outputFile rewrite the file on each run, so a rising mtime is
@@ -41,9 +60,9 @@ const text = (s) => ({ content: [{ type: "text", text: s }] });
 // ponytail: relies on sub-second mtime (ext4/xfs/apfs have it); on a 1s-granularity
 // FS a rerun finishing within the same second as the trigger reads as stale. Move
 // to a run counter written by the reporter if that ever bites.
-function resultsMtime() {
+function resultsMtime(s) {
   try {
-    return fs.statSync(session.resultsFile).mtimeMs;
+    return fs.statSync(s.resultsFile).mtimeMs;
   } catch {
     return 0;
   }
@@ -51,12 +70,17 @@ function resultsMtime() {
 
 // Record the file's mtime at the instant a run is triggered, so get_results can
 // tell the freshly-finished run apart from the previous run's leftover JSON.
-function markTriggered() {
-  session.triggeredMtime = resultsMtime();
+function markTriggered(s) {
+  s.triggeredMtime = resultsMtime(s);
 }
 
 function startSession({ runner, bin, cwd, args }) {
-  const resultsFile = path.join(os.tmpdir(), `test-warden-${process.pid}.json`);
+  // Per-cwd results file so concurrent watchers don't clobber each other's JSON.
+  const slug = crypto.createHash("sha1").update(cwd).digest("hex").slice(0, 8);
+  const resultsFile = path.join(
+    os.tmpdir(),
+    `test-warden-${process.pid}-${slug}.json`,
+  );
   try {
     fs.rmSync(resultsFile, { force: true });
   } catch {
@@ -75,19 +99,19 @@ function startSession({ runner, bin, cwd, args }) {
     log.push(d);
     if (log.length > 400) log.splice(0, log.length - 400);
   });
+  const s = { proc, runner, cwd, resultsFile, log, triggeredMtime: 0 };
   proc.onExit(() => {
-    if (session && session.proc === proc) session = null;
+    if (sessions.get(cwd) === s) sessions.delete(cwd);
   });
   // File was just deleted (mtime 0), so the watcher's initial run counts as fresh.
-  session = { proc, runner, cwd, resultsFile, log, triggeredMtime: 0 };
+  sessions.set(cwd, s);
 }
 
 // Read whichever reporter wrote results and normalize to a compact summary.
-function readResults() {
-  if (!session) return null;
+function readResults(s) {
   let raw;
   try {
-    raw = fs.readFileSync(session.resultsFile, "utf8");
+    raw = fs.readFileSync(s.resultsFile, "utf8");
   } catch {
     return null; // no run has completed yet
   }
@@ -96,11 +120,6 @@ function readResults() {
   } catch {
     return null; // mid-write
   }
-}
-
-function requireSession() {
-  if (!session) throw new Error("No watch session. Call start_watch first.");
-  return session;
 }
 
 // --- MCP server -------------------------------------------------------------
@@ -145,25 +164,36 @@ server.registerTool(
       return text(
         `${resolved} is not installed in ${cwd} (no node_modules/.bin/${resolved}). Install deps first.`,
       );
-    if (session) session.proc.kill();
+    const existing = sessions.get(cwd); // restart only this cwd's watcher
+    if (existing) existing.proc.kill();
     startSession({ runner: resolved, bin, cwd, args });
     return text(
-      `Started ${resolved} watch in ${cwd}. Use get_results to read each run.`,
+      `Started ${resolved} watch in ${cwd}. ${sessions.size} session(s) active. ` +
+        `Use get_results (pass cwd when more than one) to read each run.`,
     );
   },
 );
+
+// Shared selector: which watch session a command targets. Optional — omit when
+// only one is running.
+const cwdArg = {
+  cwd: z
+    .string()
+    .optional()
+    .describe("Which session (its start_watch cwd). Omit if only one is active."),
+};
 
 server.registerTool(
   "run_all",
   {
     description: 'Rerun the entire suite (presses "a" in the watcher).',
-    inputSchema: {},
+    inputSchema: cwdArg,
   },
-  async () => {
-    const s = requireSession();
-    markTriggered();
+  async ({ cwd }) => {
+    const s = pick(cwd);
+    markTriggered(s);
     s.proc.write("a");
-    return text("Triggered: run all.");
+    return text(`Triggered: run all in ${s.cwd}.`);
   },
 );
 
@@ -171,13 +201,13 @@ server.registerTool(
   "run_failed",
   {
     description: 'Rerun only previously failed tests (presses "f").',
-    inputSchema: {},
+    inputSchema: cwdArg,
   },
-  async () => {
-    const s = requireSession();
-    markTriggered();
+  async ({ cwd }) => {
+    const s = pick(cwd);
+    markTriggered(s);
     s.proc.write("f");
-    return text("Triggered: run failed.");
+    return text(`Triggered: run failed in ${s.cwd}.`);
   },
 );
 
@@ -189,14 +219,15 @@ server.registerTool(
     inputSchema: {
       pattern: z.string().describe("Regex/substring to filter by."),
       by: z.enum(["path", "name"]).default("path"),
+      ...cwdArg,
     },
   },
-  async ({ pattern, by }) => {
-    const s = requireSession();
-    markTriggered();
+  async ({ pattern, by, cwd }) => {
+    const s = pick(cwd);
+    markTriggered(s);
     s.proc.write(by === "name" ? "t" : "p");
     s.proc.write(pattern + CR);
-    return text(`Triggered: filter by ${by} /${pattern}/.`);
+    return text(`Triggered: filter by ${by} /${pattern}/ in ${s.cwd}.`);
   },
 );
 
@@ -205,18 +236,18 @@ server.registerTool(
   {
     description:
       "Read the latest completed run: pass/fail counts and failing tests with messages.",
-    inputSchema: {},
+    inputSchema: cwdArg,
   },
-  async () => {
-    requireSession();
+  async ({ cwd }) => {
+    const s = pick(cwd);
     // The previous run's JSON is still on disk; only trust it once the file's
     // mtime has advanced past the moment the current run was triggered.
-    if (resultsMtime() <= session.triggeredMtime)
+    if (resultsMtime(s) <= s.triggeredMtime)
       return text(
         JSON.stringify({ pending: true }, null, 2) +
           "\n// Run still in progress — give it a moment, then retry.",
       );
-    const res = readResults();
+    const res = readResults(s);
     if (!res)
       return text(
         JSON.stringify({ pending: true }, null, 2) + "\n// mid-write",
@@ -229,20 +260,29 @@ server.registerTool(
   "tail_log",
   {
     description: "Raw recent watcher output, for debugging the session.",
-    inputSchema: {},
+    inputSchema: cwdArg,
   },
-  async () =>
-    text(requireSession().log.join("").slice(-4000) || "(no output yet)"),
+  async ({ cwd }) =>
+    text(pick(cwd).log.join("").slice(-4000) || "(no output yet)"),
 );
 
 server.registerTool(
   "stop_watch",
-  { description: "Stop the watch process.", inputSchema: {} },
-  async () => {
-    if (!session) return text("No session running.");
-    session.proc.kill();
-    session = null;
-    return text("Stopped.");
+  {
+    description: "Stop a watch process, or all of them when cwd is omitted.",
+    inputSchema: cwdArg,
+  },
+  async ({ cwd }) => {
+    const targets = cwd
+      ? [sessions.get(cwd)].filter(Boolean)
+      : [...sessions.values()];
+    if (!targets.length)
+      return text(cwd ? `No session for ${cwd}.` : "No session running.");
+    for (const s of targets) {
+      s.proc.kill();
+      sessions.delete(s.cwd);
+    }
+    return text(`Stopped: ${targets.map((s) => s.cwd).join(", ")}.`);
   },
 );
 

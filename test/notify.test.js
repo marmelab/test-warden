@@ -68,3 +68,34 @@ test("stays silent on a passing run", () => {
   );
   assert.equal(run().trim(), "");
 });
+
+test("two workspaces: a passing one doesn't mask the other's failure", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-multi-"));
+  const write = (slug, blob, mtime) => {
+    const f = path.join(tmp, `test-warden-123-${slug}.json`);
+    fs.writeFileSync(f, JSON.stringify(blob));
+    fs.utimesSync(f, mtime / 1000, mtime / 1000);
+  };
+  const runIn = () =>
+    execFileSync("node", [HOOK], {
+      env: { ...process.env, TEST_WATCH_MCP_TMP: tmp },
+      input: "{}",
+      encoding: "utf8",
+    });
+
+  write("aaaa", { numTotalTests: 1, numFailedTests: 0, numFailedTestSuites: 0, testResults: [] }, 1e12);
+  write("bbbb", {
+    numTotalTests: 1,
+    numFailedTests: 1,
+    numFailedTestSuites: 1,
+    testResults: [
+      { name: "/api/x.test.ts", assertionResults: [{ status: "failed", title: "nope", failureMessages: ["e"] }] },
+    ],
+  }, 1e12);
+
+  const out = runIn();
+  assert.match(out, /1 test\(s\) failing/);
+  assert.match(out, /\/api\/x\.test\.ts/); // identifies the failing workspace
+  assert.equal(runIn().trim(), ""); // deduped on second call
+  fs.rmSync(tmp, { recursive: true, force: true });
+});

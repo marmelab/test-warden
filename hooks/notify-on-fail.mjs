@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// PostToolUse hook: after any tool call, peek at the newest test-watch results
-// file. If a *new* run completed and it's failing, surface a note to the agent.
-// Non-blocking — the agent decides what to do. One note per run (deduped by mtime).
+// PostToolUse hook: after any tool call, peek at each test-warden results file
+// (one per watched workspace). For every file whose run is *new* since last check
+// and failing, surface a note to the agent. Non-blocking — the agent decides.
+// Deduped per file by mtime, so one workspace's pass can't mask another's fail.
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
@@ -11,17 +12,15 @@ import { normalizeResults } from "../src/core.js";
 const DIR = process.env.TEST_WATCH_MCP_TMP || os.tmpdir();
 const STATE = path.join(DIR, "test-warden-notify-state");
 
-// Newest test-warden-<pid>.json in tmp. ponytail: picks newest if several
-// servers run at once — fine for the common single-server case.
-function newestResults() {
-  let best = null;
+// All test-warden-<pid>[-<slug>].json result files in tmp.
+function resultFiles() {
+  const out = [];
   for (const f of fs.readdirSync(DIR)) {
-    if (!/^test-warden-\d+\.json$/.test(f)) continue;
+    if (!/^test-warden-.+\.json$/.test(f)) continue;
     const p = path.join(DIR, f);
-    const m = fs.statSync(p).mtimeMs;
-    if (!best || m > best.m) best = { p, m };
+    out.push({ p, m: fs.statSync(p).mtimeMs });
   }
-  return best;
+  return out;
 }
 
 // Plain text to stdout — the lowest common denominator every agent's command-hook
@@ -30,30 +29,33 @@ function newestResults() {
 // visible to the user, not auto-injected into context.
 const emit = (text) => process.stdout.write(text + "\n");
 
-const cur = newestResults();
-if (!cur) process.exit(0); // no watch session
-
-// Only fire once per completed run.
-let last = 0;
+let state = {}; // resultsFile -> last-reported mtime
 try {
-  last = Number(fs.readFileSync(STATE, "utf8")) || 0;
+  state = JSON.parse(fs.readFileSync(STATE, "utf8")) || {};
 } catch {
   /* first run */
 }
-if (cur.m <= last) process.exit(0); // already reported this run
-fs.writeFileSync(STATE, String(cur.m));
 
-let res;
-try {
-  res = normalizeResults(JSON.parse(fs.readFileSync(cur.p, "utf8")));
-} catch {
-  process.exit(0); // mid-write / unreadable
+const notes = [];
+const next = {};
+for (const { p, m } of resultFiles()) {
+  next[p] = m; // rebuild state from live files (prunes dead sessions)
+  if (m <= (state[p] || 0)) continue; // already reported this run
+  let res;
+  try {
+    res = normalizeResults(JSON.parse(fs.readFileSync(p, "utf8")));
+  } catch {
+    next[p] = state[p] || 0; // mid-write — don't mark as seen, retry next time
+    continue;
+  }
+  if (res.ok) continue; // green — nothing to say
+  const names = res.failures.map((f) => `  • ${f.test} (${f.file})`).join("\n");
+  notes.push(
+    `⚠️ test-warden: ${res.failed} test(s) failing (${res.suitesFailed} suite(s)).\n${names}`,
+  );
 }
-if (res.ok) process.exit(0); // green — nothing to say
 
-const names = res.failures.map((f) => `  • ${f.test}`).join("\n");
-emit(
-  `⚠️ test-watch: ${res.failed} test(s) failing (${res.suitesFailed} suite(s)).\n${names}\n` +
-    `Call get_results for full failure messages.`,
-);
+fs.writeFileSync(STATE, JSON.stringify(next));
+if (notes.length)
+  emit(notes.join("\n") + "\nCall get_results for full failure messages.");
 process.exit(0);
