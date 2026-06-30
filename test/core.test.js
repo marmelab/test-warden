@@ -32,17 +32,28 @@ test("parseScriptEnv: pulls leading env assignments off the test script", () => 
 test("buildCommand: jest keeps positional args before the greedy --reporters", () => {
   const cmd = buildCommand("jest", "/bin/jest", "/tmp/out.json", "/r.cjs", "src/foo");
   // args must sit before --reporters, else jest reads them as reporter modules.
-  assert.match(cmd, /--watchAll src\/foo --reporters default --reporters \/r\.cjs$/);
+  assert.match(cmd, /--watchAll src\/foo --reporters default --reporters "\/r\.cjs"$/);
 });
 
 test("buildCommand: jest without extra args", () => {
   const cmd = buildCommand("jest", "/bin/jest", "/tmp/out.json", "/r.cjs");
-  assert.match(cmd, /jest" --watchAll --reporters default --reporters \/r\.cjs$/);
+  assert.match(cmd, /jest" --watchAll --reporters default --reporters "\/r\.cjs"$/);
 });
 
 test("buildCommand: vitest wires json output file and appends args", () => {
   const cmd = buildCommand("vitest", "/bin/vitest", "/tmp/out.json", "/r.cjs", "src/foo");
-  assert.match(cmd, /--reporter=json --outputFile=\/tmp\/out\.json src\/foo$/);
+  assert.match(cmd, /--reporter=json --outputFile="\/tmp\/out\.json" src\/foo$/);
+});
+
+test("buildCommand: quotes paths with spaces", () => {
+  const cmd = buildCommand(
+    "vitest",
+    "/My Apps/p/node_modules/.bin/vitest",
+    "/tmp dir/out.json",
+    "/r.cjs",
+  );
+  assert.match(cmd, /^"\/My Apps\/p\/node_modules\/\.bin\/vitest" /);
+  assert.match(cmd, /--outputFile="\/tmp dir\/out\.json"/);
 });
 
 test("detectRunner: from deps, config files, neither, and ambiguous", () => {

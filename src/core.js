@@ -73,9 +73,9 @@ export function buildCommand(runner, bin, resultsFile, reporterPath, extra) {
   if (runner === "jest") {
     // `--reporters` is a greedy array flag — keep positional args before it, or jest
     // parses them as extra reporter modules.
-    return `"${bin}" --watchAll${args} --reporters default --reporters ${reporterPath}`;
+    return `"${bin}" --watchAll${args} --reporters default --reporters "${reporterPath}"`;
   }
-  return `"${bin}" --watch --reporter=default --reporter=json --outputFile=${resultsFile}${args}`;
+  return `"${bin}" --watch --reporter=default --reporter=json --outputFile="${resultsFile}"${args}`;
 }
 
 // Normalize a parsed results blob into the compact summary the server returns.
