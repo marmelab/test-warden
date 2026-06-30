@@ -71,11 +71,16 @@ export function scriptEnv(cwd) {
 export function buildCommand(runner, bin, resultsFile, reporterPath, extra) {
   const args = extra ? ` ${extra}` : "";
   if (runner === "jest") {
+    // `--watch` (not `--watchAll`) reruns only tests related to changed files and
+    // runs nothing on a clean tree — it derives "changed" from git/hg, so it needs
+    // a VCS repo (jest errors and asks for --watchAll otherwise).
     // `--reporters` is a greedy array flag — keep positional args before it, or jest
     // parses them as extra reporter modules.
-    return `"${bin}" --watchAll${args} --reporters default --reporters "${reporterPath}"`;
+    return `"${bin}" --watch${args} --reporters default --reporters "${reporterPath}"`;
   }
-  return `"${bin}" --watch --reporter=default --reporter=json --outputFile="${resultsFile}"${args}`;
+  // `--changed` scopes the startup run to files changed vs the working tree (nothing
+  // if clean); vitest's watch already reruns only related files after that.
+  return `"${bin}" --watch --changed --reporter=default --reporter=json --outputFile="${resultsFile}"${args}`;
 }
 
 // Normalize a parsed results blob into the compact summary the server returns.
