@@ -1,4 +1,4 @@
-# test-watch-mcp
+# test-warden
 
 An MCP server that keeps a **jest** or **vitest** watch process warm and lets a coding agent pilot it: rerun all, rerun failed, filter by file/test name, and read structured results — without paying cold-start on every run.
 
@@ -16,7 +16,7 @@ Requires Node ≥ 20. `node-pty` builds a native addon on install (needs a C++ t
   "mcpServers": {
     "test-watch": {
       "command": "npx",
-      "args": ["-y", "test-watch-mcp"],
+      "args": ["-y", "test-warden"],
     },
   },
 }
@@ -54,7 +54,7 @@ captures hook output. For Claude Code, add to your project's `.claude/settings.j
         "hooks": [
           {
             "type": "command",
-            "command": "node node_modules/test-watch-mcp/hooks/notify-on-fail.mjs"
+            "command": "node node_modules/test-warden/hooks/notify-on-fail.mjs"
           }
         ]
       }

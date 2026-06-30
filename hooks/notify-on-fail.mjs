@@ -9,14 +9,14 @@ import { normalizeResults } from "../src/core.js";
 
 // DIR defaults to the tmp dir the server writes to; overridable for tests only.
 const DIR = process.env.TEST_WATCH_MCP_TMP || os.tmpdir();
-const STATE = path.join(DIR, "test-watch-mcp-notify-state");
+const STATE = path.join(DIR, "test-warden-notify-state");
 
-// Newest test-watch-mcp-<pid>.json in tmp. ponytail: picks newest if several
+// Newest test-warden-<pid>.json in tmp. ponytail: picks newest if several
 // servers run at once — fine for the common single-server case.
 function newestResults() {
   let best = null;
   for (const f of fs.readdirSync(DIR)) {
-    if (!/^test-watch-mcp-\d+\.json$/.test(f)) continue;
+    if (!/^test-warden-\d+\.json$/.test(f)) continue;
     const p = path.join(DIR, f);
     const m = fs.statSync(p).mtimeMs;
     if (!best || m > best.m) best = { p, m };

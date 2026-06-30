@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// test-watch-mcp — pilot a jest/vitest watch process over a PTY from an MCP client.
+// test-warden — pilot a jest/vitest watch process over a PTY from an MCP client.
 // One warm watch session per server process; the pty handle lives in memory, so
 // commands (run all / filter / failed) are just keystrokes written to the pty.
 import os from "node:os";
@@ -42,10 +42,7 @@ function markTriggered() {
 }
 
 function startSession({ runner, cwd, args }) {
-  const resultsFile = path.join(
-    os.tmpdir(),
-    `test-watch-mcp-${process.pid}.json`,
-  );
+  const resultsFile = path.join(os.tmpdir(), `test-warden-${process.pid}.json`);
   try {
     fs.rmSync(resultsFile, { force: true });
   } catch {
@@ -93,7 +90,7 @@ function requireSession() {
 }
 
 // --- MCP server -------------------------------------------------------------
-const server = new McpServer({ name: "test-watch-mcp", version: "0.1.0" });
+const server = new McpServer({ name: "test-warden", version: "0.1.0" });
 
 server.registerTool(
   "start_watch",
@@ -187,7 +184,9 @@ server.registerTool(
       );
     const res = readResults();
     if (!res)
-      return text(JSON.stringify({ pending: true }, null, 2) + "\n// mid-write");
+      return text(
+        JSON.stringify({ pending: true }, null, 2) + "\n// mid-write",
+      );
     return text(JSON.stringify(res, null, 2));
   },
 );

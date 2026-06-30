@@ -13,7 +13,7 @@ const HOOK = path.join(
   "notify-on-fail.mjs",
 );
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "twm-notify-test-"));
-const resultsFile = path.join(TMP, "test-watch-mcp-99999.json");
+const resultsFile = path.join(TMP, "test-warden-99999.json");
 
 // Run the hook with an isolated tmp dir; returns its stdout.
 const run = () =>
@@ -58,7 +58,12 @@ test("notifies once on a failing run, then stays silent (deduped by mtime)", () 
 
 test("stays silent on a passing run", () => {
   writeResults(
-    { numTotalTests: 2, numFailedTests: 0, numFailedTestSuites: 0, testResults: [] },
+    {
+      numTotalTests: 2,
+      numFailedTests: 0,
+      numFailedTestSuites: 0,
+      testResults: [],
+    },
     2_000_000_001_000, // newer mtime so it's seen as a fresh run
   );
   assert.equal(run().trim(), "");
