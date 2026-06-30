@@ -24,9 +24,13 @@ test("init merges, preserves existing keys, and is idempotent", () => {
   assert.equal(mcp.mcpServers["test-warden"].command, "npx");
 
   const post = read(dir, ".claude/settings.json").hooks.PostToolUse;
-  assert.equal(post.length, 2, "kept existing hook, added ours");
+  assert.equal(post.length, 3, "kept existing hook, added notify + nudge");
+  assert.ok(
+    post.some((g) => g.matcher === "Edit|Write"),
+    "added the Edit|Write nudge hook",
+  );
 
   // Second run adds nothing.
   run(dir);
-  assert.equal(read(dir, ".claude/settings.json").hooks.PostToolUse.length, 2);
+  assert.equal(read(dir, ".claude/settings.json").hooks.PostToolUse.length, 3);
 });

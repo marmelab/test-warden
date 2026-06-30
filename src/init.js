@@ -5,8 +5,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-// Absolute path to the bundled hook, so the hook command works regardless of cwd.
-const HOOK = path.join(HERE, "..", "hooks", "notify-on-fail.mjs");
+const HOOKS = path.join(HERE, "..", "hooks");
+// Absolute paths so the hook commands work regardless of cwd.
+// notify: surface failing runs (any tool). nudge: offer to start a watch on edit.
+const POST_HOOKS = [
+  { matcher: "*", command: `node ${path.join(HOOKS, "notify-on-fail.mjs")}` },
+  { matcher: "Edit|Write", command: `node ${path.join(HOOKS, "nudge-watch.mjs")}` },
+];
 
 // Read JSON (or {} if absent/empty), apply `merge`, write back pretty-printed.
 function patchJson(file, merge) {
@@ -30,24 +35,22 @@ export function run(cwd = process.cwd()) {
     },
   }));
 
-  // 2) Add the PostToolUse hook (Claude Code), unless an identical one is present.
+  // 2) Add the PostToolUse hooks (Claude Code), skipping any already present.
   patchJson(path.join(cwd, ".claude", "settings.json"), (c) => {
-    const cmd = `node ${HOOK}`;
     const post = c.hooks?.PostToolUse ?? [];
-    if (post.some((g) => g.hooks?.some((h) => h.command === cmd))) return c;
+    const has = (cmd) => post.some((g) => g.hooks?.some((h) => h.command === cmd));
+    const additions = POST_HOOKS.filter((h) => !has(h.command)).map((h) => ({
+      matcher: h.matcher,
+      hooks: [{ type: "command", command: h.command }],
+    }));
+    if (!additions.length) return c;
     return {
       ...c,
-      hooks: {
-        ...c.hooks,
-        PostToolUse: [
-          ...post,
-          { matcher: "*", hooks: [{ type: "command", command: cmd }] },
-        ],
-      },
+      hooks: { ...c.hooks, PostToolUse: [...post, ...additions] },
     };
   });
 
   console.log(
-    `test-warden: registered MCP server in .mcp.json and failure hook in .claude/settings.json (${cwd})`,
+    `test-warden: registered MCP server in .mcp.json and hooks in .claude/settings.json (${cwd})`,
   );
 }

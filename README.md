@@ -79,7 +79,22 @@ captures hook output. For Claude Code, add to your project's `.claude/settings.j
 }
 ```
 
-Fires once per failing run (deduped by results-file mtime); silent while green.
+Fires once per failing run (deduped by results-file mtime); silent while green. `npx test-warden init` adds this for you.
+
+## Auto-start on edit (optional)
+
+A second bundled hook, `nudge-watch.mjs` (matcher `Edit|Write`), removes the "did I start the watcher?" step: when you edit a file inside a jest/vitest package that isn't being watched, it nudges the agent to call `start_watch` for that exact package (cwd + detected runner). A hook can't call an MCP tool or reach the server's in-memory session, so it can't start the watcher itself — it prompts the agent, which then makes the call. Fires once per package dir; silent if a watcher for it already exists or the file isn't in a test package. `npx test-warden init` wires it up:
+
+```jsonc
+{
+  "matcher": "Edit|Write",
+  "hooks": [
+    { "type": "command", "command": "node node_modules/test-warden/hooks/nudge-watch.mjs" }
+  ]
+}
+```
+
+Unlike the notify hook, this one emits Claude Code's `additionalContext` envelope — the nudge has to reach the model to trigger the tool call, and on Claude only the envelope does.
 
 ## Limitations
 
