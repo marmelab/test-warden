@@ -1,28 +1,16 @@
 #!/usr/bin/env node
-// PostToolUse hook on Edit|Write: when you edit a file in a jest/vitest package
-// that isn't being watched yet, nudge the agent to start_watch for that package.
-// Fires once per package dir; silent if already watching or not a test package.
+// Claude Code PostToolUse hook on Edit|Write: when you edit a file in a jest/vitest
+// package that isn't being watched yet, nudge the agent to start_watch for that
+// package. Fires once per package dir; silent if already watching or not a test package.
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { detectRunner } from "../src/core.js";
+import { emitContext } from "./emit.mjs";
 
 const DIR = process.env.TEST_WATCH_MCP_TMP || os.tmpdir();
 const STATE = path.join(DIR, "test-warden-nudge-state");
-
-// Claude Code reads PostToolUse additionalContext (this JSON envelope) into the
-// model's context — required here, since the point is to prompt a tool call. (The
-// notify hook uses plain text because being merely user-visible is enough there.)
-const emit = (text) =>
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PostToolUse",
-        additionalContext: text,
-      },
-    }),
-  );
 
 // The edited file path arrives on stdin as the tool call's input.
 let file;
@@ -71,7 +59,7 @@ const runnerNote =
   pkg.runner === "ambiguous"
     ? "jest and vitest are both present — pass runner explicitly"
     : `runner: ${pkg.runner}`;
-emit(
+emitContext(
   `🛡️ test-warden: tests in ${pkg.cwd} aren't being watched. ` +
     `Call start_watch { cwd: "${pkg.cwd}" } (${runnerNote}) for warm, fast test runs as you edit.`,
 );

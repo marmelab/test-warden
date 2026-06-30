@@ -54,12 +54,17 @@ Or configure manually:
 
 ## Failure notifications (optional)
 
+> **The bundled hooks are Claude Code specific.** The MCP server (the tools above) is
+> agent-agnostic standard MCP; only the optional hooks below target Claude Code. They
+> emit Claude's `additionalContext` envelope, the only hook channel that reaches the
+> model. Agent-specific output lives behind one function, `hooks/emit.mjs` — that's the
+> seam to branch for another agent later.
+
 MCP servers can't push to the agent on their own — the agent only reacts to a tool
 return or a client-side hook. So failures are surfaced via a bundled `PostToolUse`
 hook: after any tool call, it peeks at the latest run and, if a *new* run is failing,
-prints a one-line note to stdout (non-blocking — the agent decides). Plain stdout is
-the lowest common denominator, so this works with any agent whose hook system
-captures hook output. For Claude Code, add to your project's `.claude/settings.json`:
+injects a one-line note into the agent's context (non-blocking — the agent decides).
+Add to your project's `.claude/settings.json`:
 
 ```jsonc
 {
@@ -83,7 +88,7 @@ Fires once per failing run (deduped by results-file mtime); silent while green. 
 
 ## Auto-start on edit (optional)
 
-A second bundled hook, `nudge-watch.mjs` (matcher `Edit|Write`), removes the "did I start the watcher?" step: when you edit a file inside a jest/vitest package that isn't being watched, it nudges the agent to call `start_watch` for that exact package (cwd + detected runner). A hook can't call an MCP tool or reach the server's in-memory session, so it can't start the watcher itself — it prompts the agent, which then makes the call. Fires once per package dir; silent if a watcher for it already exists or the file isn't in a test package. `npx test-warden init` wires it up:
+A second bundled hook, `nudge-watch.mjs` (matcher `Edit|Write`, also Claude Code specific), removes the "did I start the watcher?" step: when you edit a file inside a jest/vitest package that isn't being watched, it nudges the agent to call `start_watch` for that exact package (cwd + detected runner). A hook can't call an MCP tool or reach the server's in-memory session, so it can't start the watcher itself — it prompts the agent, which then makes the call. Fires once per package dir; silent if a watcher for it already exists or the file isn't in a test package. `npx test-warden init` wires it up:
 
 ```jsonc
 {
@@ -93,8 +98,6 @@ A second bundled hook, `nudge-watch.mjs` (matcher `Edit|Write`), removes the "di
   ]
 }
 ```
-
-Unlike the notify hook, this one emits Claude Code's `additionalContext` envelope — the nudge has to reach the model to trigger the tool call, and on Claude only the envelope does.
 
 ## Limitations
 
