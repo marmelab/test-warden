@@ -37,6 +37,7 @@ const sessions = new Map(); // cwd -> { proc, runner, cwd, resultsFile, log, tri
 
 const CR = "\r";
 const text = (s) => ({ content: [{ type: "text", text: s }] });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Resolve which session a command targets: explicit cwd, else the only one.
 function pick(cwd) {
@@ -265,17 +266,21 @@ server.registerTool(
   },
   async ({ cwd }) => {
     const s = pick(cwd);
-    // The previous run's JSON is still on disk; only trust it once the file's
-    // mtime has advanced past the moment the current run was triggered.
-    if (resultsMtime(s) <= s.triggeredMtime)
-      return text(
-        JSON.stringify({ pending: true }, null, 2) +
-          "\n// Run still in progress — give it a moment, then retry.",
-      );
-    const res = readResults(s);
+    // Block until the in-flight run lands instead of returning pending and making
+    // the agent poll. Trust the JSON only once its mtime advanced past the trigger
+    // (a fresh run) and it parses (not mid-write).
+    // ponytail: 30s ceiling so we return before a typical MCP client request
+    // timeout; bump it or make it an arg if a suite legitimately runs longer.
+    const deadline = Date.now() + 30_000;
+    let res = null;
+    while (Date.now() < deadline) {
+      if (resultsMtime(s) > s.triggeredMtime && (res = readResults(s))) break;
+      await sleep(100);
+    }
     if (!res)
       return text(
-        JSON.stringify({ pending: true }, null, 2) + "\n// mid-write",
+        JSON.stringify({ pending: true }, null, 2) +
+          "\n// Still running after 30s — retry, or check tail_log.",
       );
     return text(JSON.stringify(res, null, 2));
   },
