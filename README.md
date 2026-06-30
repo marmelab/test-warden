@@ -38,7 +38,7 @@ Or configure manually:
 
 | Tool           | Args                                        | Does                                                             |
 | -------------- | ------------------------------------------- | ---------------------------------------------------------------- |
-| `start_watch`  | `cwd`, `runner?` (`jest`\|`vitest`), `args?` | Launch a warm watch session in `cwd`. Runner auto-detected from `cwd`'s `package.json`; pass `runner` only to override. |
+| `start_watch`  | `cwd`, `runner?` (`jest`\|`vitest`), `args?`, `env?` | Launch a warm watch session in `cwd`. Runner auto-detected from `cwd`'s `package.json`; pass `runner` only to override. |
 | `run_all`      | `cwd?`                                       | Rerun the whole suite.                                           |
 | `run_failed`   | `cwd?`                                       | Rerun only previously failed tests.                             |
 | `run_filtered` | `pattern`, `by` (`path`\|`name`), `cwd?`     | Rerun tests matching a filter.                                   |
@@ -47,6 +47,8 @@ Or configure manually:
 | `stop_watch`   | `cwd?`                                       | Stop one session, or all when `cwd` is omitted.                 |
 
 `get_results` reads jest's `AggregatedResult` (via a bundled reporter) and vitest's `--reporter=json` — normalized to the same shape.
+
+**Env vars:** tests often rely on env set in the `test` script (e.g. `"test": "TZ=UTC jest"` for stable dates). Since the server launches the runner binary directly, it reads those inline assignments (including a `cross-env` prefix) from the project's `test` script and applies them — so you don't get false negatives. Env set inside jest/vitest *config* already works. For file-loaded vars (dotenv-cli, env-cmd) or one-off overrides, pass `env` to `start_watch`.
 
 **Monorepos:** one warm session per `cwd`, so you can watch several at once (e.g. `mobile` on jest and `api` on vitest concurrently). The runner is detected per-`cwd`, and the binary is resolved from `node_modules/.bin` walking up to the workspace root (so hoisted installs resolve). The `cwd` arg on the other tools picks which session — omit it when only one is running. The failure hook reports each workspace independently, so a green run in one never hides a red run in another.
 

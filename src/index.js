@@ -15,6 +15,7 @@ import {
   buildCommand,
   detectRunner,
   resolveBin,
+  scriptEnv,
   normalizeResults,
 } from "./core.js";
 
@@ -74,7 +75,7 @@ function markTriggered(s) {
   s.triggeredMtime = resultsMtime(s);
 }
 
-function startSession({ runner, bin, cwd, args }) {
+function startSession({ runner, bin, cwd, args, env }) {
   // Per-cwd results file so concurrent watchers don't clobber each other's JSON.
   const slug = crypto.createHash("sha1").update(cwd).digest("hex").slice(0, 8);
   const resultsFile = path.join(
@@ -92,7 +93,15 @@ function startSession({ runner, bin, cwd, args }) {
     cols: 120,
     rows: 40,
     cwd,
-    env: { ...process.env, TEST_WATCH_MCP_OUT: resultsFile, CI: "" },
+    // Layer env: base process → what the project's test script sets (e.g. TZ=UTC)
+    // → caller override → our required vars (which must win, esp. CI="" for watch).
+    env: {
+      ...process.env,
+      ...scriptEnv(cwd),
+      ...env,
+      TEST_WATCH_MCP_OUT: resultsFile,
+      CI: "",
+    },
   });
   const log = [];
   proc.onData((d) => {
@@ -144,9 +153,15 @@ server.registerTool(
         .describe(
           "Extra CLI args appended to the runner (e.g. a path filter).",
         ),
+      env: z
+        .record(z.string())
+        .optional()
+        .describe(
+          "Extra env vars for the runner. Inline assignments in the project's `test` script (e.g. TZ=UTC) are applied automatically; use this for file-loaded vars (dotenv) or overrides.",
+        ),
     },
   },
-  async ({ runner, cwd, args }) => {
+  async ({ runner, cwd, args, env }) => {
     let resolved = runner;
     if (!resolved) {
       try {
@@ -166,7 +181,7 @@ server.registerTool(
       );
     const existing = sessions.get(cwd); // restart only this cwd's watcher
     if (existing) existing.proc.kill();
-    startSession({ runner: resolved, bin, cwd, args });
+    startSession({ runner: resolved, bin, cwd, args, env });
     return text(
       `Started ${resolved} watch in ${cwd}. ${sessions.size} session(s) active. ` +
         `Use get_results (pass cwd when more than one) to read each run.`,

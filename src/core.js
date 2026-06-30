@@ -38,6 +38,36 @@ export function resolveBin(cwd, runner) {
   }
 }
 
+// Extract leading `KEY=value` assignments from a package.json script command
+// (after an optional `cross-env`/`cross-env-shell` prefix). Projects set env this
+// way for deterministic tests — e.g. `TZ=UTC jest` to freeze dates — and launching
+// the runner binary directly would drop it, causing false negatives. Returns {}.
+// ponytail: parses inline + cross-env only; file loaders (dotenv-cli, env-cmd)
+// aren't followed — pass those through start_watch's `env` arg.
+export function parseScriptEnv(script) {
+  if (!script) return {};
+  let s = script.trim().replace(/^cross-env(-shell)?\s+/, "");
+  const env = {};
+  const re = /^(\w+)=("([^"]*)"|'([^']*)'|(\S+))\s+/;
+  let m;
+  while ((m = re.exec(s))) {
+    env[m[1]] = m[3] ?? m[4] ?? m[5];
+    s = s.slice(m[0].length);
+  }
+  return env;
+}
+
+// Env vars the project's `test` script sets inline, for the runner at `cwd`.
+export function scriptEnv(cwd) {
+  let pkg = {};
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
+  } catch {
+    /* no/unreadable package.json */
+  }
+  return parseScriptEnv(pkg.scripts?.test);
+}
+
 export function buildCommand(runner, bin, resultsFile, reporterPath, extra) {
   const args = extra ? ` ${extra}` : "";
   if (runner === "jest") {

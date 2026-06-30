@@ -7,8 +7,27 @@ import {
   buildCommand,
   detectRunner,
   resolveBin,
+  parseScriptEnv,
   normalizeResults,
 } from "../src/core.js";
+
+test("parseScriptEnv: pulls leading env assignments off the test script", () => {
+  assert.deepEqual(parseScriptEnv("TZ=UTC jest"), { TZ: "UTC" });
+  assert.deepEqual(parseScriptEnv("TZ=UTC LANG=en_US vitest run"), {
+    TZ: "UTC",
+    LANG: "en_US",
+  });
+  // cross-env prefix and quoted values
+  assert.deepEqual(parseScriptEnv('cross-env TZ="America/New_York" jest'), {
+    TZ: "America/New_York",
+  });
+  assert.deepEqual(parseScriptEnv("cross-env-shell FOO='a b' jest"), {
+    FOO: "a b",
+  });
+  // no assignments / empty
+  assert.deepEqual(parseScriptEnv("vitest run"), {});
+  assert.deepEqual(parseScriptEnv(undefined), {});
+});
 
 test("buildCommand: jest keeps positional args before the greedy --reporters", () => {
   const cmd = buildCommand("jest", "/bin/jest", "/tmp/out.json", "/r.cjs", "src/foo");
