@@ -13,7 +13,9 @@ const HOOK = path.join(
   "notify-on-fail.mjs",
 );
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "twm-notify-test-"));
-const resultsFile = path.join(TMP, "test-warden-99999.json");
+const SLUG = "abcd1234";
+const resultsFile = path.join(TMP, `test-warden-99999-${SLUG}.json`);
+const liveMarker = path.join(TMP, `test-warden-${SLUG}.live`);
 
 // Run the hook with an isolated tmp dir; returns its stdout.
 const run = () =>
@@ -23,6 +25,9 @@ const run = () =>
     encoding: "utf8",
   });
 
+// A live watcher must exist for results to count — mark this test process as the owner.
+const markLive = () => fs.writeFileSync(liveMarker, String(process.pid));
+
 const writeResults = (blob, mtimeMs) => {
   fs.writeFileSync(resultsFile, JSON.stringify(blob));
   if (mtimeMs) fs.utimesSync(resultsFile, mtimeMs / 1000, mtimeMs / 1000);
@@ -31,6 +36,7 @@ const writeResults = (blob, mtimeMs) => {
 after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 test("notifies once on a failing run, then stays silent (deduped by mtime)", () => {
+  markLive();
   writeResults(
     {
       numTotalTests: 2,
@@ -51,12 +57,14 @@ test("notifies once on a failing run, then stays silent (deduped by mtime)", () 
   const first = run();
   assert.match(first, /1 test\(s\) failing/);
   assert.match(first, /boom/);
+  assert.match(first, /get_results/); // points the agent at the full failure detail
 
   // Same run (same mtime) → no repeat notification.
   assert.equal(run().trim(), "");
 });
 
 test("stays silent on a passing run", () => {
+  markLive();
   writeResults(
     {
       numTotalTests: 2,
@@ -69,12 +77,32 @@ test("stays silent on a passing run", () => {
   assert.equal(run().trim(), "");
 });
 
+test("ignores and reaps failing results with no live watcher (orphaned session)", () => {
+  // A failing run left behind by a dead watch — the exact bug: notify must NOT report
+  // it (nudge would correctly say "not watched"), and should clean up the orphan.
+  fs.rmSync(liveMarker, { force: true }); // no live watcher for this slug
+  writeResults(
+    {
+      numTotalTests: 1,
+      numFailedTests: 1,
+      numFailedTestSuites: 1,
+      testResults: [
+        { name: "/p/z.test.js", assertionResults: [{ status: "failed", title: "stale" }] },
+      ],
+    },
+    2_000_000_002_000,
+  );
+  assert.equal(run().trim(), ""); // silent — no phantom failure
+  assert.equal(fs.existsSync(resultsFile), false); // orphan reaped
+});
+
 test("two workspaces: a passing one doesn't mask the other's failure", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-multi-"));
   const write = (slug, blob, mtime) => {
     const f = path.join(tmp, `test-warden-123-${slug}.json`);
     fs.writeFileSync(f, JSON.stringify(blob));
     fs.utimesSync(f, mtime / 1000, mtime / 1000);
+    fs.writeFileSync(path.join(tmp, `test-warden-${slug}.live`), String(process.pid)); // live watcher
   };
   const runIn = () =>
     execFileSync("node", [HOOK], {

@@ -17,6 +17,7 @@ import {
   scriptEnv,
   normalizeResults,
   slugFor,
+  watcherAlive,
 } from "./core.js";
 
 // `test-warden init` wires the server + hook into the current project, then exits.
@@ -96,30 +97,17 @@ function markTriggered(s) {
   s.triggeredMtime = resultsMtime(s);
 }
 
-// Cross-process guard: is a *different*, still-alive test-warden already watching
-// this project? The .live marker holds the owning server's pid. A second file-watch
-// on the same tree is a real perf hit — it can grind the machine to a halt — so we
-// refuse rather than spawn a duplicate. A dead pid (crashed server) or our own pid
-// means it's free. Returns the owning pid, or 0 if free.
+// Cross-process guard: is a *different*, still-alive test-warden already watching this
+// project? A second file-watch on the same tree is a real perf hit — it can grind the
+// machine to a halt — so we refuse rather than spawn a duplicate. Reuses the shared
+// liveness check (same marker the hooks read); our own pid (a restart) reads as free.
 // ponytail: check-then-spawn isn't atomic — two servers starting in the same
 // millisecond could both win. Realistic triggers (config, two editor windows) are
 // human-paced, so a plain check suffices; switch to an O_EXCL lockfile only if
 // simultaneous starts ever actually collide.
 function watchedElsewhere(cwd) {
-  const liveFile = path.join(os.tmpdir(), `test-warden-${slugFor(cwd)}.live`);
-  let pid;
-  try {
-    pid = Number(fs.readFileSync(liveFile, "utf8"));
-  } catch {
-    return 0; // no marker — free
-  }
-  if (pid === process.pid) return 0; // our own (restart)
-  try {
-    process.kill(pid, 0); // throws if the owner is gone
-    return pid; // alive & not us → owned elsewhere
-  } catch {
-    return 0; // crashed owner — free (start_watch overwrites the marker)
-  }
+  const pid = watcherAlive(os.tmpdir(), slugFor(cwd));
+  return pid === process.pid ? 0 : pid; // our own marker (restart) ⇒ free
 }
 
 async function startSession({ runner, bin, cwd, args, env }) {

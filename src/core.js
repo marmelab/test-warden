@@ -19,6 +19,28 @@ export function slugFor(cwd) {
   return crypto.createHash("sha1").update(real).digest("hex").slice(0, 8);
 }
 
+// Is a watch process currently alive for `slug`? True iff its `.live` marker exists in
+// `dir` and names a still-running pid. THE single source of truth for "watched" — both
+// hooks gate on it so they can't disagree (notify reporting failures for a dir nudge
+// calls "not watched"). Reaps the marker if the owning server has died, so a crashed
+// session self-heals. Returns the live pid, or 0 if not watched.
+export function watcherAlive(dir, slug) {
+  const live = path.join(dir, `test-warden-${slug}.live`);
+  let pid;
+  try {
+    pid = Number(fs.readFileSync(live, "utf8"));
+  } catch {
+    return 0; // no marker — not watched
+  }
+  try {
+    process.kill(pid, 0); // probe liveness; throws if the pid is gone
+    return pid;
+  } catch {
+    fs.rmSync(live, { force: true }); // stale marker from a dead/crashed server
+    return 0;
+  }
+}
+
 // Which test runner does the project at `cwd` use? Looks at its package.json deps
 // and config files. Returns "jest" | "vitest" | null (neither). Throws if both —
 // the caller should then ask for an explicit runner. Detection is per-cwd, so a

@@ -5,30 +5,10 @@
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import { detectRunner, slugFor } from "../src/core.js";
+import { detectRunner, slugFor, watcherAlive } from "../src/core.js";
 import { emitContext } from "./emit.mjs";
 
 const DIR = process.env.TEST_WATCH_MCP_TMP || os.tmpdir();
-
-// Is a watch actually alive for this cwd? The server writes a .live marker (pid)
-// on start and removes it on exit; a leftover from a crashed server has a dead pid.
-// Re-checking this every edit (instead of nudging once) is what makes it reliable.
-function isWatched(cwd) {
-  const live = path.join(DIR, `test-warden-${slugFor(cwd)}.live`);
-  let pid;
-  try {
-    pid = Number(fs.readFileSync(live, "utf8"));
-  } catch {
-    return false; // no marker — not watching
-  }
-  try {
-    process.kill(pid, 0); // probe liveness; throws if the pid is gone
-    return true;
-  } catch {
-    fs.rmSync(live, { force: true }); // stale marker from a dead server
-    return false;
-  }
-}
 
 // The edited file path arrives on stdin as the tool call's input.
 let file;
@@ -58,7 +38,8 @@ function findPackage(start) {
 const pkg = findPackage(file);
 if (!pkg) process.exit(0); // not inside a jest/vitest package
 
-if (isWatched(pkg.cwd)) process.exit(0); // already watched — nothing to nudge
+// Re-checking liveness every edit (not nudging once) is what makes this reliable.
+if (watcherAlive(DIR, slugFor(pkg.cwd))) process.exit(0); // already watched — don't nudge
 
 const runnerNote =
   pkg.runner === "ambiguous"
