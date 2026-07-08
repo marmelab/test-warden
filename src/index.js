@@ -95,7 +95,21 @@ function resultsMtime(s) {
 // tell the freshly-finished run apart from the previous run's leftover JSON.
 function markTriggered(s) {
   s.triggeredMtime = resultsMtime(s);
+  s.lastActivity = Date.now();
 }
+
+// Idle timeout: a warm watcher holds real RAM, and an abandoned session shouldn't
+// keep paying it. Activity = an MCP-triggered run or any completed auto-run (the
+// results file advancing). Idle watchers are killed; the next run_* transparently
+// restarts them with the same params (cold-start cost, paid once).
+// ponytail: env knob instead of config plumbing — TEST_WARDEN_IDLE_MS overrides.
+const IDLE_MS = Number(process.env.TEST_WARDEN_IDLE_MS) || 30 * 60_000;
+const lastStart = new Map(); // canonical cwd -> { runner, args, env } for restarts
+setInterval(() => {
+  const now = Date.now();
+  for (const s of sessions.values())
+    if (now - Math.max(s.lastActivity, resultsMtime(s)) > IDLE_MS) s.proc.kill();
+}, Math.min(IDLE_MS, 60_000)).unref();
 
 // Cross-process guard: is a *different*, still-alive test-warden already watching this
 // project? A second file-watch on the same tree is a real perf hit — it can grind the
@@ -163,7 +177,18 @@ async function startSession({ runner, bin, cwd, args, env }) {
     }
   });
   fs.writeFileSync(liveFile, String(process.pid));
-  const s = { proc, runner, cwd, resultsFile, liveFile, log, ready, triggeredMtime: 0 };
+  lastStart.set(cwd, { runner, args, env }); // so an idle-killed watcher restarts faithfully
+  const s = {
+    proc,
+    runner,
+    cwd,
+    resultsFile,
+    liveFile,
+    log,
+    ready,
+    triggeredMtime: 0,
+    lastActivity: Date.now(),
+  };
   proc.onExit(() => {
     // Guarded: a restart (kill old → start new) writes the new marker before the
     // old proc's exit fires, so only the still-current session clears it.
@@ -257,7 +282,14 @@ async function ensureSession(cwd) {
             : e.message, // multiple sessions active — pick() already says "pass cwd"
       };
   }
-  return startWatchCore({ cwd }); // auto-detect runner, start, return {session}|{error}
+  // Auto-start — with the same params as the last watch here (e.g. after an idle kill).
+  let real = cwd;
+  try {
+    real = fs.realpathSync(cwd);
+  } catch {
+    /* missing dir — startWatchCore reports it */
+  }
+  return startWatchCore({ cwd, ...lastStart.get(real) });
 }
 
 // Block until the watch's in-flight run lands, rather than returning pending and making
@@ -302,7 +334,7 @@ server.registerTool(
   "start_watch",
   {
     description:
-      "Start a jest/vitest watch in the given project. Once started, the watch runs continuously and automatically reruns every test impacted by any unstaged change. The runner is auto-detected from cwd's package.json — only pass it to override.",
+      "Start a jest/vitest watch in the given project. Once started, the watch runs continuously and automatically reruns every test impacted by any unstaged change. After 30 min without a run it stops itself; any run_* call restarts it transparently. The runner is auto-detected from cwd's package.json — only pass it to override.",
     inputSchema: {
       cwd: z
         .string()

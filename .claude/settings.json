@@ -18,6 +18,24 @@
             "command": "node hooks/nudge-watch.mjs"
           }
         ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /home/thiery/dev/test-warden/hooks/notify-on-fail.mjs"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /home/thiery/dev/test-warden/hooks/nudge-watch.mjs"
+          }
+        ]
       }
     ]
   }
