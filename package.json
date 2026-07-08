@@ -18,6 +18,8 @@
     "node": ">=20"
   },
   "license": "MIT",
+  "repository": "github:marmelab/test-warden",
+  "keywords": ["mcp", "jest", "vitest", "watch", "testing", "agent"],
   "packageManager": "pnpm@10.4.1",
   "pnpm": {
     "onlyBuiltDependencies": [
