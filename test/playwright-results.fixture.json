@@ -1,0 +1,161 @@
+{
+ "suites": [
+  {
+   "title": "tmp-fail.spec.js",
+   "file": "tmp-fail.spec.js",
+   "column": 0,
+   "line": 0,
+   "specs": [
+    {
+     "title": "intentionally fails",
+     "ok": false,
+     "tags": [],
+     "tests": [
+      {
+       "timeout": 30000,
+       "annotations": [],
+       "expectedStatus": "passed",
+       "projectId": "",
+       "projectName": "",
+       "results": [
+        {
+         "workerIndex": 0,
+         "parallelIndex": 0,
+         "status": "failed",
+         "duration": 658,
+         "error": {
+          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  locator('h1')\nExpected: \u001b[32m\"nope\"\u001b[39m\nReceived: \u001b[31m\"todo\"\u001b[39m\nTimeout:  500ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" with timeout 500ms\u001b[22m\n\u001b[2m  - waiting for locator('h1')\u001b[22m\n\u001b[2m    6 × locator resolved to <h1>todo</h1>\u001b[22m\n\u001b[2m      - unexpected value \"todo\"\u001b[22m\n",
+          "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  locator('h1')\nExpected: \u001b[32m\"nope\"\u001b[39m\nReceived: \u001b[31m\"todo\"\u001b[39m\nTimeout:  500ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" with timeout 500ms\u001b[22m\n\u001b[2m  - waiting for locator('h1')\u001b[22m\n\u001b[2m    6 × locator resolved to <h1>todo</h1>\u001b[22m\n\u001b[2m      - unexpected value \"todo\"\u001b[22m\n\n    at /home/thiery/dev/test-warden/demo/playwright/e2e/tmp-fail.spec.js:3:25",
+          "location": {
+           "file": "/home/thiery/dev/test-warden/demo/playwright/e2e/tmp-fail.spec.js",
+           "column": 25,
+           "line": 3
+          },
+          "snippet": "  1 | import { test, expect } from \"./fixtures.js\";\n  2 | test(\"intentionally fails\", async ({ heading }) => {\n> 3 |   await expect(heading).toHaveText(\"nope\", { timeout: 500 });\n    |                         ^\n  4 | });\n  5 |"
+         },
+         "errors": [
+          {
+           "location": {
+            "file": "/home/thiery/dev/test-warden/demo/playwright/e2e/tmp-fail.spec.js",
+            "column": 25,
+            "line": 3
+           },
+           "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator:  locator('h1')\nExpected: \u001b[32m\"nope\"\u001b[39m\nReceived: \u001b[31m\"todo\"\u001b[39m\nTimeout:  500ms\n\nCall log:\n\u001b[2m  - Expect \"toHaveText\" with timeout 500ms\u001b[22m\n\u001b[2m  - waiting for locator('h1')\u001b[22m\n\u001b[2m    6 × locator resolved to <h1>todo</h1>\u001b[22m\n\u001b[2m      - unexpected value \"todo\"\u001b[22m\n\n\n  1 | import { test, expect } from \"./fixtures.js\";\n  2 | test(\"intentionally fails\", async ({ heading }) => {\n> 3 |   await expect(heading).toHaveText(\"nope\", { timeout: 500 });\n    |                         ^\n  4 | });\n  5 |\n    at /home/thiery/dev/test-warden/demo/playwright/e2e/tmp-fail.spec.js:3:25"
+          }
+         ],
+         "stdout": [],
+         "stderr": [],
+         "retry": 0,
+         "startTime": "2026-07-08T13:29:50.076Z",
+         "annotations": [],
+         "attachments": [
+          {
+           "name": "error-context",
+           "contentType": "text/markdown",
+           "path": "/home/thiery/dev/test-warden/demo/playwright/test-results/tmp-fail-intentionally-fails/error-context.md"
+          }
+         ],
+         "errorLocation": {
+          "file": "/home/thiery/dev/test-warden/demo/playwright/e2e/tmp-fail.spec.js",
+          "column": 25,
+          "line": 3
+         }
+        }
+       ],
+       "status": "unexpected"
+      }
+     ],
+     "id": "767f07123dcf00f665c9-e926f6e6fc072166f484",
+     "file": "tmp-fail.spec.js",
+     "line": 2,
+     "column": 1
+    }
+   ]
+  },
+  {
+   "title": "todo.spec.js",
+   "file": "todo.spec.js",
+   "column": 0,
+   "line": 0,
+   "specs": [
+    {
+     "title": "shows the heading",
+     "ok": true,
+     "tags": [],
+     "tests": [
+      {
+       "timeout": 30000,
+       "annotations": [],
+       "expectedStatus": "passed",
+       "projectId": "",
+       "projectName": "",
+       "results": [
+        {
+         "workerIndex": 1,
+         "parallelIndex": 1,
+         "status": "passed",
+         "duration": 190,
+         "errors": [],
+         "stdout": [],
+         "stderr": [],
+         "retry": 0,
+         "startTime": "2026-07-08T13:29:50.083Z",
+         "annotations": [],
+         "attachments": []
+        }
+       ],
+       "status": "expected"
+      }
+     ],
+     "id": "486a7bbfb15f2ca1070b-3e61c701adbd5f9da37f",
+     "file": "todo.spec.js",
+     "line": 3,
+     "column": 1
+    },
+    {
+     "title": "heading is visible",
+     "ok": true,
+     "tags": [],
+     "tests": [
+      {
+       "timeout": 30000,
+       "annotations": [],
+       "expectedStatus": "passed",
+       "projectId": "",
+       "projectName": "",
+       "results": [
+        {
+         "workerIndex": 1,
+         "parallelIndex": 1,
+         "status": "passed",
+         "duration": 125,
+         "errors": [],
+         "stdout": [],
+         "stderr": [],
+         "retry": 0,
+         "startTime": "2026-07-08T13:29:50.452Z",
+         "annotations": [],
+         "attachments": []
+        }
+       ],
+       "status": "expected"
+      }
+     ],
+     "id": "486a7bbfb15f2ca1070b-ad50a8700bd90229f174",
+     "file": "todo.spec.js",
+     "line": 7,
+     "column": 1
+    }
+   ]
+  }
+ ],
+ "errors": [],
+ "stats": {
+  "startTime": "2026-07-08T13:29:48.959Z",
+  "duration": 2027.6830000000002,
+  "expected": 2,
+  "skipped": 0,
+  "unexpected": 1,
+  "flaky": 0
+ }
+}

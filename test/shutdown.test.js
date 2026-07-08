@@ -91,7 +91,10 @@ const exitOf = (proc, ms) =>
         new Promise((r) => setTimeout(() => r("zombie"), ms)),
       ]);
 
-const LIVE_FILE = path.join(os.tmpdir(), `test-warden-${slugFor(DEMO)}.live`);
+const LIVE_FILE = path.join(
+  os.tmpdir(),
+  `test-warden-${slugFor(DEMO, "vitest")}.live`,
+);
 const markerPid = () => Number(fs.readFileSync(LIVE_FILE, "utf8").split("\n")[0]);
 
 test("closing stdin kills the server, its watcher, and the live marker", async () => {

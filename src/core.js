@@ -4,18 +4,22 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-// Stable per-project key. realpath collapses symlinks, `..`, and trailing slashes,
+// Stable per-watch key. realpath collapses symlinks, `..`, and trailing slashes,
 // so the same directory spelled two ways yields ONE slug — one watcher, one results
-// file, one lock. Used by both the server and the nudge hook, so they must agree:
-// hence shared here. Falls back to the raw path if the dir is missing (can't be
-// watched anyway) to keep the slug deterministic.
-export function slugFor(cwd) {
+// file, one lock. The runner is part of the key because a unit runner and playwright
+// legitimately coexist in one package as separate watch sessions. Used by both the
+// server and the hooks, so they must agree: hence shared here. Falls back to the raw
+// path if the dir is missing (can't be watched anyway) to keep the slug
+// deterministic. Omitting runner reproduces the legacy runner-less slug (only used
+// to match markers left by old versions).
+export function slugFor(cwd, runner) {
   let real = cwd;
   try {
     real = fs.realpathSync(cwd);
   } catch {
     /* missing dir */
   }
+  if (runner) real += `\0${runner}`;
   return crypto.createHash("sha1").update(real).digest("hex").slice(0, 8);
 }
 
@@ -68,6 +72,47 @@ export function detectRunner(cwd) {
   return vitest ? "vitest" : jest ? "jest" : null;
 }
 
+// Does the project at `cwd` use Playwright? Deliberately separate from
+// detectRunner: playwright coexists with a unit runner (unit + e2e side by side is
+// the normal setup), so its presence is never "ambiguous" — it's a second watchable
+// runner, keyed apart by slugFor(cwd, runner).
+export function detectPlaywright(cwd) {
+  let pkg = {};
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
+  } catch {
+    /* no/unreadable package.json — fall through to config-file check */
+  }
+  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+  return (
+    "@playwright/test" in deps ||
+    ["js", "ts", "mjs", "cjs", "mts", "cts"].some((e) =>
+      fs.existsSync(path.join(cwd, `playwright.config.${e}`)),
+    )
+  );
+}
+
+// Absolute testDir from cwd's playwright config, or null. Location is how
+// playwright itself decides what's a test, and most specs don't import
+// @playwright/test directly (custom fixtures modules are the norm) — so the nudge
+// hook checks this first, content second.
+// ponytail: regex over an executable config — a computed/imported testDir isn't
+// followed (returns null, nudge falls back to the content sniff); upgrade path is
+// a one-hop relative-import sniff.
+export function playwrightTestDir(cwd) {
+  for (const e of ["js", "ts", "mjs", "cjs", "mts", "cts"]) {
+    let src;
+    try {
+      src = fs.readFileSync(path.join(cwd, `playwright.config.${e}`), "utf8");
+    } catch {
+      continue;
+    }
+    const m = /testDir\s*:\s*['"]([^'"]+)['"]/.exec(src);
+    return m ? path.resolve(cwd, m[1]) : null;
+  }
+  return null;
+}
+
 // Absolute path to the runner binary, searching node_modules/.bin from cwd upward
 // so hoisted monorepos (bin at the workspace root) resolve too. null if not found.
 export function resolveBin(cwd, runner) {
@@ -97,19 +142,33 @@ export function parseScriptEnv(script) {
   return env;
 }
 
-// Env vars the project's `test` script sets inline, for the runner at `cwd`.
-export function scriptEnv(cwd) {
+// Env vars the project's test script sets inline, for the runner at `cwd`.
+// Playwright projects keep their e2e script separate from `test` (test:e2e, e2e…),
+// so for playwright we take the first script that invokes it — inheriting the unit
+// script's env would be wrong, and vice versa.
+export function scriptEnv(cwd, runner) {
   let pkg = {};
   try {
     pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
   } catch {
     /* no/unreadable package.json */
   }
-  return parseScriptEnv(pkg.scripts?.test);
+  const script =
+    runner === "playwright"
+      ? Object.values(pkg.scripts ?? {}).find((s) => /\bplaywright\b/.test(s))
+      : pkg.scripts?.test;
+  return parseScriptEnv(script);
 }
 
 export function buildCommand(runner, bin, resultsFile, reporterPath, extra) {
   const args = extra ? ` ${extra}` : "";
+  if (runner === "playwright") {
+    // Flagless on purpose: watch mode is env-gated (PWTEST_WATCH=1) and DROPS the
+    // CLI --reporter flag, but appends the reporter named in PW_TEST_REPORTER to
+    // every run — which reads its output path from PLAYWRIGHT_JSON_OUTPUT_NAME.
+    // startSession injects all three. Headless is playwright's default.
+    return `"${bin}" test${args}`;
+  }
   if (runner === "jest") {
     // `--watch` (not `--watchAll`) reruns only tests related to changed files and
     // runs nothing on a clean tree — it derives "changed" from git/hg, so it needs
@@ -124,10 +183,12 @@ export function buildCommand(runner, bin, resultsFile, reporterPath, extra) {
 }
 
 // Normalize a parsed results blob into the compact summary the server returns.
-// Two near-identical shapes show up: jest's reporter-API AggregatedResult uses
-// `testFilePath` + a nested `testResults` array per suite; vitest's json reporter
-// (and jest's `--json` CLI) use `name` + `assertionResults`. Accept either.
+// Three shapes show up: jest's reporter-API AggregatedResult uses `testFilePath` +
+// a nested `testResults` array per suite; vitest's json reporter (and jest's
+// `--json` CLI) use `name` + `assertionResults`; playwright's json reporter uses
+// `stats` + recursive `suites` → `specs` → `tests` → `results`. Accept any.
 export function normalizeResults(r) {
+  if (r.stats || r.suites) return normalizePlaywright(r);
   const failures = [];
   for (const suite of r.testResults ?? []) {
     const assertions = suite.assertionResults ?? suite.testResults ?? [];
@@ -148,6 +209,42 @@ export function normalizeResults(r) {
     failed: r.numFailedTests ?? 0,
     suitesFailed: r.numFailedTestSuites ?? 0,
     ok: (r.numFailedTests ?? 0) === 0 && (r.numFailedTestSuites ?? 0) === 0,
+    failures,
+  };
+}
+
+function normalizePlaywright(r) {
+  const s = r.stats ?? {};
+  const root = r.config?.rootDir;
+  const failures = [];
+  // Suites nest per describe block; a suite's own title repeats its file name at
+  // the top level, so only include titles that differ from the file in the chain.
+  const walk = (suite, chain) => {
+    const named =
+      suite.title && suite.title !== suite.file ? [...chain, suite.title] : chain;
+    for (const sub of suite.suites ?? []) walk(sub, named);
+    for (const spec of suite.specs ?? []) {
+      if (spec.ok) continue;
+      const results = (spec.tests ?? []).flatMap((t) => t.results ?? []);
+      const error = results.findLast((res) => res.error)?.error;
+      const file = spec.file ?? suite.file ?? "";
+      failures.push({
+        test: [...named, spec.title].join(" > "),
+        file: root && file ? path.resolve(root, file) : file,
+        message: (error?.message ?? "").slice(0, 2000),
+      });
+    }
+  };
+  for (const suite of r.suites ?? []) walk(suite, []);
+  const failed = s.unexpected ?? 0;
+  const suitesFailed = (r.errors ?? []).length; // config/loader-level errors
+  return {
+    // `flaky` passed on retry and `skipped` didn't run — count both in total only.
+    total: (s.expected ?? 0) + failed + (s.skipped ?? 0) + (s.flaky ?? 0),
+    passed: (s.expected ?? 0) + (s.flaky ?? 0),
+    failed,
+    suitesFailed,
+    ok: failed === 0 && suitesFailed === 0,
     failures,
   };
 }

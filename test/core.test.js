@@ -5,10 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildCommand,
+  detectPlaywright,
   detectRunner,
+  playwrightTestDir,
   resolveBin,
   parseScriptEnv,
   normalizeResults,
+  scriptEnv,
   slugFor,
 } from "../src/core.js";
 
@@ -20,6 +23,16 @@ test("slugFor: same dir via trailing slash or symlink yields one slug", () => {
   assert.equal(slugFor(`${dir}/`), base); // trailing slash collapses
   assert.equal(slugFor(link), base); // symlink resolves to the same real path
   fs.rmSync(link, { force: true });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("slugFor: same dir + different runner yields distinct, stable slugs", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tw-slug-"));
+  const unit = slugFor(dir, "vitest");
+  const e2e = slugFor(dir, "playwright");
+  assert.notEqual(unit, e2e); // one watcher per (cwd, runner) pair
+  assert.notEqual(unit, slugFor(dir)); // runner-less (legacy) slug is its own key
+  assert.equal(slugFor(`${dir}/`, "vitest"), unit); // canonicalization still applies
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -58,6 +71,37 @@ test("buildCommand: vitest scopes startup to changed files and wires json output
   assert.match(cmd, /--reporter=json --outputFile="\/tmp\/out\.json" src\/foo$/);
 });
 
+test("buildCommand: playwright is flagless — watch and json ride on env", () => {
+  const cmd = buildCommand("playwright", "/bin/playwright", "/tmp/out.json", "/r.cjs");
+  assert.equal(cmd, '"/bin/playwright" test');
+  const withArgs = buildCommand("playwright", "/bin/playwright", "/tmp/out.json", "/r.cjs", "--project=chromium");
+  assert.equal(withArgs, '"/bin/playwright" test --project=chromium');
+});
+
+test("scriptEnv: playwright reads the e2e script's env, not the unit test's", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twm-senv-"));
+  fs.writeFileSync(
+    path.join(dir, "package.json"),
+    JSON.stringify({
+      scripts: {
+        test: "TZ=UTC vitest",
+        "test:e2e": "BASE_URL=http://localhost:4000 playwright test",
+      },
+    }),
+  );
+  assert.deepEqual(scriptEnv(dir), { TZ: "UTC" }); // unit: unchanged default
+  assert.deepEqual(scriptEnv(dir, "playwright"), {
+    BASE_URL: "http://localhost:4000",
+  });
+  // no playwright script → {} (not the unit script's env)
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "twm-senv-"));
+  fs.writeFileSync(
+    path.join(bare, "package.json"),
+    JSON.stringify({ scripts: { test: "TZ=UTC vitest" } }),
+  );
+  assert.deepEqual(scriptEnv(bare, "playwright"), {});
+});
+
 test("buildCommand: quotes paths with spaces", () => {
   const cmd = buildCommand(
     "vitest",
@@ -89,6 +133,46 @@ test("detectRunner: from deps, config files, neither, and ambiguous", () => {
   assert.equal(detectRunner(mk(() => {})), null); // no package.json at all
   // both → throws so the caller asks for an explicit runner
   assert.throws(() => detectRunner(mk((d) => pkg(d, { devDependencies: { jest: "^29", vitest: "^1" } }))), /both/i);
+});
+
+test("detectPlaywright: dep or config file, independent of the unit runner", () => {
+  const mk = (setup) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twm-pw-"));
+    setup(dir);
+    return dir;
+  };
+  const pkg = (dir, obj) =>
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(obj));
+
+  assert.equal(detectPlaywright(mk((d) => pkg(d, { devDependencies: { "@playwright/test": "^1" } }))), true);
+  assert.equal(detectPlaywright(mk((d) => fs.writeFileSync(path.join(d, "playwright.config.ts"), ""))), true);
+  assert.equal(detectPlaywright(mk((d) => pkg(d, { devDependencies: { vitest: "^1" } }))), false);
+  assert.equal(detectPlaywright(mk(() => {})), false);
+  // coexistence: playwright alongside a unit runner is NOT ambiguous —
+  // detectRunner still answers for the unit side, detectPlaywright for e2e
+  const both = mk((d) =>
+    pkg(d, { devDependencies: { vitest: "^1", "@playwright/test": "^1" } }),
+  );
+  assert.equal(detectPlaywright(both), true);
+  assert.equal(detectRunner(both), "vitest");
+});
+
+test("playwrightTestDir: extracts a literal testDir, else null", () => {
+  const mk = (name, content) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twm-pwdir-"));
+    if (name) fs.writeFileSync(path.join(dir, name), content);
+    return dir;
+  };
+  // double quotes, single quotes, ts config
+  let d = mk("playwright.config.js", 'export default defineConfig({ testDir: "./e2e" });');
+  assert.equal(playwrightTestDir(d), path.join(d, "e2e"));
+  d = mk("playwright.config.ts", "export default defineConfig({\n  testDir: './tests/e2e',\n});");
+  assert.equal(playwrightTestDir(d), path.join(d, "tests/e2e"));
+  // no testDir literal (computed or absent) → null
+  assert.equal(playwrightTestDir(mk("playwright.config.js", "export default {}")), null);
+  assert.equal(playwrightTestDir(mk("playwright.config.js", "const dir = x; export default { testDir: dir }")), null);
+  // no config at all → null
+  assert.equal(playwrightTestDir(mk(null)), null);
 });
 
 test("resolveBin: walks up to a hoisted node_modules/.bin", () => {
@@ -192,6 +276,65 @@ test("normalizeResults: all-green run is ok with no failures", () => {
   });
   assert.equal(r.ok, true);
   assert.deepEqual(r.failures, []);
+});
+
+// Playwright's json reporter: stats + suites→specs→tests→results, captured from a
+// real 1.61 run (one failing spec among three). See demo/playwright.
+test("normalizeResults: playwright json shape (real fixture)", () => {
+  const fixture = JSON.parse(
+    fs.readFileSync(new URL("./playwright-results.fixture.json", import.meta.url), "utf8"),
+  );
+  const r = normalizeResults(fixture);
+  assert.equal(r.total, 3);
+  assert.equal(r.passed, 2);
+  assert.equal(r.failed, 1);
+  assert.equal(r.suitesFailed, 0);
+  assert.equal(r.ok, false);
+  assert.equal(r.failures.length, 1);
+  assert.equal(r.failures[0].test, "intentionally fails");
+  assert.match(r.failures[0].file, /tmp-fail\.spec\.js$/);
+  assert.match(r.failures[0].message, /toHaveText/);
+});
+
+test("normalizeResults: playwright nested describe blocks and green runs", () => {
+  const green = normalizeResults({
+    stats: { expected: 2, unexpected: 0, skipped: 0, flaky: 0 },
+    suites: [],
+    errors: [],
+  });
+  assert.equal(green.ok, true);
+  assert.deepEqual(green.failures, []);
+  const nested = normalizeResults({
+    stats: { expected: 0, unexpected: 1, skipped: 0, flaky: 0 },
+    errors: [{ message: "config error" }],
+    suites: [
+      {
+        title: "a.spec.js",
+        file: "a.spec.js",
+        suites: [
+          {
+            title: "checkout",
+            file: "a.spec.js",
+            specs: [
+              {
+                title: "pays",
+                ok: false,
+                tests: [
+                  { results: [{ status: "failed", error: { message: "boom" } }] },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(nested.failed, 1);
+  assert.equal(nested.suitesFailed, 1); // top-level errors count as suite failures
+  assert.equal(nested.ok, false);
+  assert.deepEqual(nested.failures, [
+    { test: "checkout > pays", file: "a.spec.js", message: "boom" },
+  ]);
 });
 
 test("normalizeResults: missing fields default to zero, not crash", () => {

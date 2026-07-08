@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// test-warden — pilot jest/vitest watch processes over a PTY from an MCP client.
-// One warm watch session per project dir (so a monorepo can watch several at once);
-// the pty handles live in memory, so commands (run all / filter / failed) are just
+// test-warden — pilot jest/vitest/playwright watch processes over a PTY from an MCP
+// client. One warm watch session per (project dir, runner) pair — a monorepo can
+// watch several packages, and one package can watch unit + e2e side by side; the
+// pty handles live in memory, so commands (run all / filter / failed) are just
 // keystrokes written to the pty.
 import os from "node:os";
 import fs from "node:fs";
@@ -12,6 +13,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   buildCommand,
+  detectPlaywright,
   detectRunner,
   resolveBin,
   scriptEnv,
@@ -48,32 +50,36 @@ async function getPty() {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JEST_REPORTER = path.join(HERE, "jest-reporter.cjs");
 
-// --- watch sessions, keyed by project dir ----------------------------------
-const sessions = new Map(); // cwd -> { proc, runner, cwd, resultsFile, log, triggeredMtime }
+// --- watch sessions, keyed by (project dir, runner) -------------------------
+// One package legitimately holds two sessions: its unit runner and playwright.
+const sessions = new Map(); // keyFor(cwd, runner) -> { proc, runner, cwd, resultsFile, log, triggeredMtime }
+const keyFor = (cwd, runner) => `${cwd}\0${runner}`;
 
 const CR = "\r";
 const text = (s) => ({ content: [{ type: "text", text: s }] });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const describe = (s) => `${s.cwd} [${s.runner}]`;
 
-// Resolve which session a command targets: explicit cwd, else the only one.
-function pick(cwd) {
+// Resolve which session a command targets: explicit cwd/runner, else the only match.
+function pick(cwd, runner) {
   if (cwd) {
     try {
       cwd = fs.realpathSync(cwd); // match start_watch's canonical key
     } catch {
-      /* missing dir — get() misses below and we throw the clear error */
+      /* missing dir — the filter misses below and we throw the clear error */
     }
-    const s = sessions.get(cwd);
-    if (s) return s;
-    throw new Error(
-      `No watch session for ${cwd}. Active: ${[...sessions.keys()].join(", ") || "none"}.`,
-    );
   }
-  if (sessions.size === 1) return [...sessions.values()][0];
+  const matches = [...sessions.values()].filter(
+    (s) => (!cwd || s.cwd === cwd) && (!runner || s.runner === runner),
+  );
+  if (matches.length === 1) return matches[0];
+  const active = [...sessions.values()].map(describe).join(", ");
   if (sessions.size === 0)
     throw new Error("No watch session. Call start_watch first.");
+  if (matches.length === 0)
+    throw new Error(`No matching watch session. Active: ${active}.`);
   throw new Error(
-    `Multiple watch sessions active — pass cwd. Active: ${[...sessions.keys()].join(", ")}.`,
+    `Several watch sessions match — pass ${cwd ? "runner" : "cwd (and runner if the dir has both)"}. Active: ${active}.`,
   );
 }
 
@@ -104,7 +110,7 @@ function markTriggered(s) {
 // restarts them with the same params (cold-start cost, paid once).
 // ponytail: env knob instead of config plumbing — TEST_WARDEN_IDLE_MS overrides.
 const IDLE_MS = Number(process.env.TEST_WARDEN_IDLE_MS) || 30 * 60_000;
-const lastStart = new Map(); // canonical cwd -> { runner, args, env } for restarts
+const lastStart = new Map(); // keyFor(cwd, runner) -> { runner, args, env } for restarts
 setInterval(() => {
   const now = Date.now();
   for (const s of sessions.values())
@@ -119,20 +125,24 @@ setInterval(() => {
 // millisecond could both win. Realistic triggers (config, two editor windows) are
 // human-paced, so a plain check suffices; switch to an O_EXCL lockfile only if
 // simultaneous starts ever actually collide.
-function watchedElsewhere(cwd) {
-  const pid = watcherAlive(os.tmpdir(), slugFor(cwd));
+function watchedElsewhere(cwd, runner) {
+  // Probe the legacy runner-less slug too: a pre-runner-keyed server's marker must
+  // still block/evict, and watcherAlive reaps it once that server is dead.
+  const pid =
+    watcherAlive(os.tmpdir(), slugFor(cwd, runner)) ||
+    watcherAlive(os.tmpdir(), slugFor(cwd));
   return pid === process.pid ? 0 : pid; // our own marker (restart) ⇒ free
 }
 
 async function startSession({ runner, bin, cwd, args, env }) {
   const pty = await getPty(); // native addon; throws a clear message if unbuilt
-  // Per-cwd results file so concurrent watchers don't clobber each other's JSON.
-  const slug = slugFor(cwd);
+  // Per-(cwd, runner) results file so concurrent watchers don't clobber each other.
+  const slug = slugFor(cwd, runner);
   const resultsFile = path.join(
     os.tmpdir(),
     `test-warden-${process.pid}-${slug}.json`,
   );
-  // Liveness marker for the nudge hook: present + pid-alive ⇒ this cwd is watched.
+  // Liveness marker for the nudge hook: present + pid-alive ⇒ this pair is watched.
   // Unlike resultsFile (deleted here, reappears only after the first run), it exists
   // for the whole session, so the hook never false-nudges a freshly-started watch.
   const liveFile = path.join(os.tmpdir(), `test-warden-${slug}.live`);
@@ -142,6 +152,17 @@ async function startSession({ runner, bin, cwd, args, env }) {
     /* ignore */
   }
   const cmd = buildCommand(runner, bin, resultsFile, JEST_REPORTER, args);
+  // Playwright's watch is env-gated, and its watch loop drops CLI --reporter — but
+  // appends the PW_TEST_REPORTER reporter to every run, which reads its output path
+  // from PLAYWRIGHT_JSON_OUTPUT_NAME (see buildCommand).
+  const pwEnv =
+    runner === "playwright"
+      ? {
+          PWTEST_WATCH: "1",
+          PW_TEST_REPORTER: "json",
+          PLAYWRIGHT_JSON_OUTPUT_NAME: resultsFile,
+        }
+      : {};
   const proc = pty.spawn("/bin/sh", ["-c", cmd], {
     name: "xterm-color",
     cols: 120,
@@ -151,8 +172,9 @@ async function startSession({ runner, bin, cwd, args, env }) {
     // → caller override → our required vars (which must win, esp. CI="" for watch).
     env: {
       ...process.env,
-      ...scriptEnv(cwd),
+      ...scriptEnv(cwd, runner),
       ...env,
+      ...pwEnv,
       TEST_WATCH_MCP_OUT: resultsFile,
       CI: "",
     },
@@ -163,7 +185,7 @@ async function startSession({ runner, bin, cwd, args, env }) {
   // prints its idle-prompt marker once (and only once) it accepts keys.
   let readyResolve;
   const ready = new Promise((r) => (readyResolve = r));
-  const READY = /Waiting for file changes|Watch Usage/; // vitest | jest idle prompt
+  const READY = /Waiting for file changes|Watch Usage/; // vitest+playwright | jest idle prompt
   let tail = "";
   proc.onData((d) => {
     log.push(d);
@@ -177,7 +199,7 @@ async function startSession({ runner, bin, cwd, args, env }) {
     }
   });
   fs.writeFileSync(liveFile, `${process.pid}\n${cwd}`); // see watcherAlive for the format
-  lastStart.set(cwd, { runner, args, env }); // so an idle-killed watcher restarts faithfully
+  lastStart.set(keyFor(cwd, runner), { runner, args, env }); // so an idle-killed watcher restarts faithfully
   const s = {
     proc,
     runner,
@@ -192,13 +214,13 @@ async function startSession({ runner, bin, cwd, args, env }) {
   proc.onExit(() => {
     // Guarded: a restart (kill old → start new) writes the new marker before the
     // old proc's exit fires, so only the still-current session clears it.
-    if (sessions.get(cwd) === s) {
-      sessions.delete(cwd);
+    if (sessions.get(keyFor(cwd, runner)) === s) {
+      sessions.delete(keyFor(cwd, runner));
       fs.rmSync(liveFile, { force: true });
     }
   });
   // File was just deleted (mtime 0), so the watcher's initial run counts as fresh.
-  sessions.set(cwd, s);
+  sessions.set(keyFor(cwd, runner), s);
   return s;
 }
 
@@ -231,14 +253,22 @@ async function startWatchCore({ runner, cwd, args, env }) {
   }
   let resolved = runner;
   if (!resolved) {
+    let unit;
     try {
-      resolved = detectRunner(cwd);
+      unit = detectRunner(cwd);
     } catch (e) {
-      return { error: e.message }; // both detected — ask the agent to specify
+      return { error: e.message }; // jest AND vitest — ask the agent to specify
     }
+    // Playwright coexisting with a unit runner is the normal setup, but an
+    // auto-detected start can't guess which of the two the agent means.
+    if (unit && detectPlaywright(cwd))
+      return {
+        error: `${cwd} has both ${unit} and playwright — pass runner to say which to watch.`,
+      };
+    resolved = unit ?? (detectPlaywright(cwd) ? "playwright" : null);
     if (!resolved)
       return {
-        error: `No jest or vitest found in ${cwd}. This server only drives those two runners.`,
+        error: `No jest, vitest or playwright found in ${cwd}. This server only drives those runners.`,
       };
   }
   const bin = resolveBin(cwd, resolved);
@@ -246,7 +276,7 @@ async function startWatchCore({ runner, cwd, args, env }) {
     return {
       error: `${resolved} is not installed in ${cwd} (no node_modules/.bin/${resolved}). Install deps first.`,
     };
-  const existing = sessions.get(cwd); // restart only this cwd's watcher
+  const existing = sessions.get(keyFor(cwd, resolved)); // restart only this pair's watcher
   if (existing) {
     existing.proc.kill();
   } else {
@@ -258,7 +288,7 @@ async function startWatchCore({ runner, cwd, args, env }) {
     // ponytail: SIGTERM kills the owner's watchers on OTHER dirs too — a server is
     // one agent session, so its whole session is stale; per-dir eviction needs an
     // IPC channel this doesn't have.
-    const owner = watchedElsewhere(cwd);
+    const owner = watchedElsewhere(cwd, resolved);
     if (owner) {
       try {
         process.kill(owner, "SIGTERM");
@@ -266,8 +296,9 @@ async function startWatchCore({ runner, cwd, args, env }) {
         /* already gone */
       }
       const deadline = Date.now() + 5_000;
-      while (watchedElsewhere(cwd) && Date.now() < deadline) await sleep(50);
-      if (watchedElsewhere(cwd))
+      while (watchedElsewhere(cwd, resolved) && Date.now() < deadline)
+        await sleep(50);
+      if (watchedElsewhere(cwd, resolved))
         return {
           error: `${cwd} is watched by another test-warden (pid ${owner}) that did not exit on SIGTERM — kill it manually.`,
         };
@@ -282,9 +313,9 @@ async function startWatchCore({ runner, cwd, args, env }) {
 
 // Resolve the run_* target: reuse the live session, or auto-start one so run_* work
 // even before start_watch was called. Returns { session } or { error }.
-async function ensureSession(cwd) {
+async function ensureSession(cwd, runner) {
   try {
-    return { session: pick(cwd) }; // existing: explicit cwd, or the sole session
+    return { session: pick(cwd, runner) }; // existing: explicit args, or the sole match
   } catch (e) {
     // Can only auto-start with a concrete cwd; without one, point at how to proceed.
     if (!cwd)
@@ -292,17 +323,26 @@ async function ensureSession(cwd) {
         error:
           sessions.size === 0
             ? "No watch running and no cwd given — pass cwd to auto-start a watch here."
-            : e.message, // multiple sessions active — pick() already says "pass cwd"
+            : e.message, // several sessions match — pick() already says what to pass
       };
   }
-  // Auto-start — with the same params as the last watch here (e.g. after an idle kill).
+  // Auto-start — with the same params as the last watch here (e.g. after an idle
+  // kill). Without an explicit runner, a single remembered start for this cwd is
+  // unambiguous; several (unit + e2e watched earlier) fall through to detection,
+  // which errors with "pass runner".
   let real = cwd;
   try {
     real = fs.realpathSync(cwd);
   } catch {
     /* missing dir — startWatchCore reports it */
   }
-  return startWatchCore({ cwd, ...lastStart.get(real) });
+  const remembered = runner
+    ? [lastStart.get(keyFor(real, runner))]
+    : [...lastStart.entries()]
+        .filter(([k]) => k.startsWith(`${real}\0`))
+        .map(([, v]) => v);
+  const params = remembered.length === 1 ? remembered[0] : undefined;
+  return startWatchCore({ cwd, runner, ...params });
 }
 
 // Block until the watch's in-flight run lands, rather than returning pending and making
@@ -347,15 +387,15 @@ server.registerTool(
   "start_watch",
   {
     description:
-      "Start a jest/vitest watch in the given project. Once started, the watch runs continuously and automatically reruns every test impacted by any unstaged change. After 30 min without a run it stops itself; any run_* call restarts it transparently. The runner is auto-detected from cwd's package.json — only pass it to override.",
+      "Start a jest/vitest/playwright watch in the given project. Once started, the watch runs continuously and automatically reruns every test impacted by any unstaged change (playwright: any change to a test file or a file it imports; headless). One watch per (cwd, runner) pair — a package can watch its unit runner and playwright side by side. After 30 min without a run it stops itself; any run_* call restarts it transparently. The runner is auto-detected from cwd's package.json — pass it when a package has several (e.g. vitest + playwright).",
     inputSchema: {
       cwd: z
         .string()
         .describe("Absolute path to the project/workspace to run tests in."),
       runner: z
-        .enum(["jest", "vitest"])
+        .enum(["jest", "vitest", "playwright"])
         .optional()
-        .describe("Override auto-detection (e.g. when a package has both)."),
+        .describe("Override auto-detection — required when a package has both a unit runner and playwright."),
       args: z
         .string()
         .optional()
@@ -383,12 +423,21 @@ server.registerTool(
 );
 
 // Shared selector: which watch session a command targets. Optional — omit when
-// only one is running.
+// only one matches.
+const runnerArg = {
+  runner: z
+    .enum(["jest", "vitest", "playwright"])
+    .optional()
+    .describe(
+      "Which runner's session, when one dir watches several (e.g. vitest + playwright). Omit otherwise.",
+    ),
+};
 const cwdArg = {
   cwd: z
     .string()
     .optional()
     .describe("Which session (its start_watch cwd). Omit if only one is active."),
+  ...runnerArg,
 };
 
 // run_* also auto-start a watch when none is running, so for them cwd doubles as the
@@ -400,6 +449,7 @@ const runCwdArg = {
     .describe(
       "Project dir. Omit if a single watch is already running; pass it to target a specific watch, or to auto-start one if none is running.",
     ),
+  ...runnerArg,
 };
 
 server.registerTool(
@@ -409,16 +459,57 @@ server.registerTool(
       "Run the whole suite once and return its pass/fail results (counts + failing tests with messages). Waits for the run to finish. Auto-starts a watch if none is running yet (pass cwd).",
     inputSchema: runCwdArg,
   },
-  async ({ cwd }) => {
-    const { session: s, error } = await ensureSession(cwd);
+  async ({ cwd, runner }) => {
+    const { session: s, error } = await ensureSession(cwd, runner);
     if (error) return text(error);
     if (!(await awaitReady(s))) return notReadyText(s);
+    if (s.runner === "playwright") return resultsText(await playwrightRunAll(s));
     markTriggered(s);
     s.proc.write("a"); // "a" = run all, in the runner's watch UI
     s.fullScope = true; // "a" also durably escapes the startup --changed scope
     return resultsText(await waitForResults(s));
   },
 );
+
+// Playwright's watch has no "run all" key: Enter reruns with the CURRENT filters,
+// and filters persist across runs. Submitting an EMPTY filter prompt clears that
+// filter and immediately runs — so clear whatever this session set (name first:
+// the last clearing run, with every filter gone, IS the full run) and only fall
+// back to a plain Enter when nothing was filtered.
+async function playwrightRunAll(s) {
+  let res = null;
+  for (const [flag, key] of [
+    ["nameFiltered", "t"],
+    ["pathFiltered", "p"],
+  ]) {
+    if (!s[flag]) continue;
+    markTriggered(s);
+    await typeInto(s, key, "");
+    res = await waitForResults(s);
+    s[flag] = false;
+  }
+  if (!res) {
+    markTriggered(s);
+    s.proc.write(CR); // Enter = run tests (no filters set → all of them)
+    res = await waitForResults(s);
+  }
+  return res;
+}
+
+// Open a watch filter prompt (`p` = file, `t` = test name) and type `pattern` into
+// it like a human: one keystroke per write, with a breath between. A coalesced
+// chunk ("todo\r") reaches the prompt as ONE key — the pattern shows but the
+// trailing Enter never registers, wedging the watcher in pattern mode and eating
+// every later keystroke. The first pause is longer for playwright, whose prompt
+// (enquirer) mounts asynchronously and drops keys typed before it's up.
+async function typeInto(s, key, pattern) {
+  s.proc.write(key);
+  if (s.runner === "playwright") await sleep(300);
+  for (const ch of pattern + CR) {
+    await sleep(25);
+    s.proc.write(ch);
+  }
+}
 
 server.registerTool(
   "run_failed",
@@ -427,12 +518,12 @@ server.registerTool(
       "Rerun only the tests that failed in the last run and return the results — faster than the full suite while iterating on a fix. Waits for the run to finish. Auto-starts a watch if none is running (pass cwd).",
     inputSchema: runCwdArg,
   },
-  async ({ cwd }) => {
-    const { session: s, error } = await ensureSession(cwd);
+  async ({ cwd, runner }) => {
+    const { session: s, error } = await ensureSession(cwd, runner);
     if (error) return text(error);
     if (!(await awaitReady(s))) return notReadyText(s);
     markTriggered(s);
-    s.proc.write("f"); // "f" = run only failed, in the runner's watch UI
+    s.proc.write("f"); // "f" = run only failed, in every runner's watch UI
     return resultsText(await waitForResults(s));
   },
 );
@@ -451,32 +542,29 @@ server.registerTool(
       ...runCwdArg,
     },
   },
-  async ({ pattern, by, cwd }) => {
-    const { session: s, error } = await ensureSession(cwd);
+  async ({ pattern, by, cwd, runner }) => {
+    const { session: s, error } = await ensureSession(cwd, runner);
     if (error) return text(error);
     if (!(await awaitReady(s))) return notReadyText(s);
-    // The watch starts scoped to changed files, and the interactive filter only
-    // searches within that scope — so a filter for an untouched file finds nothing.
-    // Escape once per session: run the full suite ("a") and let it land — filtering
-    // mid-run cancels it before the scope widens — then filters see all files.
+    // jest/vitest watches start scoped to changed files, and the interactive filter
+    // only searches within that scope — so a filter for an untouched file finds
+    // nothing. Escape once per session: run the full suite ("a") and let it land —
+    // filtering mid-run cancels it before the scope widens — then filters see all
+    // files. Playwright has no startup scope (its watch idles until a run).
     // ponytail: costs one full-suite run on a session's first run_filtered; piloting
     // the watcher offers no cheaper reliable escape.
-    if (!s.fullScope) {
+    if (!s.fullScope && s.runner !== "playwright") {
       markTriggered(s);
       s.proc.write("a");
       await waitForResults(s);
       s.fullScope = true;
     }
     markTriggered(s);
-    // Type the filter like a human: one keystroke per write, with a breath between.
-    // A coalesced chunk ("todo\r") reaches jest's prompt as ONE key — the pattern
-    // shows but the trailing Enter never registers, wedging the watcher in pattern
-    // mode and eating every later keystroke.
-    s.proc.write(by === "name" ? "t" : "p"); // "t" = filter by test name, "p" = by path
-    for (const ch of pattern + CR) {
-      await sleep(25);
-      s.proc.write(ch);
-    }
+    // "t" = filter by test name, "p" = by path — same keys in all three watch UIs.
+    // Playwright filters persist across runs; remember what we set so run_all can
+    // clear it.
+    s[by === "name" ? "nameFiltered" : "pathFiltered"] = true;
+    await typeInto(s, by === "name" ? "t" : "p", pattern);
     return resultsText(await waitForResults(s));
   },
 );
@@ -488,8 +576,8 @@ server.registerTool(
       "Read the latest run's results (pass/fail counts and failing tests with messages) without triggering a new run — use after editing code, since the watch auto-reruns impacted tests. Waits for an in-progress run to finish. Requires start_watch first (or use a run_* tool, which auto-starts).",
     inputSchema: cwdArg,
   },
-  async ({ cwd }) => {
-    const s = pick(cwd);
+  async ({ cwd, runner }) => {
+    const s = pick(cwd, runner);
     return resultsText(await waitForResults(s));
   },
 );
@@ -501,28 +589,37 @@ server.registerTool(
       "Raw recent watcher output — for debugging the session, e.g. when get_results stays pending or the watcher seems stuck.",
     inputSchema: cwdArg,
   },
-  async ({ cwd }) =>
-    text(pick(cwd).log.join("").slice(-4000) || "(no output yet)"),
+  async ({ cwd, runner }) =>
+    text(pick(cwd, runner).log.join("").slice(-4000) || "(no output yet)"),
 );
 
 server.registerTool(
   "stop_watch",
   {
-    description: "Stop the continuous watch for a project, or all watches when cwd is omitted.",
+    description:
+      "Stop the continuous watch for a project — all of the dir's watches when runner is omitted (cwd means \"everything here\"), all watches everywhere when cwd is omitted too.",
     inputSchema: cwdArg,
   },
-  async ({ cwd }) => {
-    // pick() realpaths cwd so a symlink/trailing-slash spelling still finds the session.
-    const targets = cwd ? [pick(cwd)] : [...sessions.values()];
-    if (!targets.length) return text("No session running.");
+  async ({ cwd, runner }) => {
+    if (cwd) {
+      try {
+        cwd = fs.realpathSync(cwd); // match start_watch's canonical key
+      } catch {
+        /* missing dir — the filter below just finds nothing */
+      }
+    }
+    const targets = [...sessions.values()].filter(
+      (s) => (!cwd || s.cwd === cwd) && (!runner || s.runner === runner),
+    );
+    if (!targets.length) return text("No matching session running.");
     for (const s of targets) {
       s.proc.kill();
-      sessions.delete(s.cwd);
-      // onExit's cleanup is guarded by `sessions.get(cwd) === s`, which the delete
+      sessions.delete(keyFor(s.cwd, s.runner));
+      // onExit's cleanup is guarded by `sessions.get(key) === s`, which the delete
       // above just broke — reap the live marker here or it outlives the session.
       fs.rmSync(s.liveFile, { force: true });
     }
-    return text(`Stopped: ${targets.map((s) => s.cwd).join(", ")}.`);
+    return text(`Stopped: ${targets.map(describe).join(", ")}.`);
   },
 );
 
