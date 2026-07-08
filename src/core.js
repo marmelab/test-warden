@@ -142,19 +142,33 @@ export function parseScriptEnv(script) {
   return env;
 }
 
-// Env vars the project's `test` script sets inline, for the runner at `cwd`.
-export function scriptEnv(cwd) {
+// Env vars the project's test script sets inline, for the runner at `cwd`.
+// Playwright projects keep their e2e script separate from `test` (test:e2e, e2e…),
+// so for playwright we take the first script that invokes it — inheriting the unit
+// script's env would be wrong, and vice versa.
+export function scriptEnv(cwd, runner) {
   let pkg = {};
   try {
     pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
   } catch {
     /* no/unreadable package.json */
   }
-  return parseScriptEnv(pkg.scripts?.test);
+  const script =
+    runner === "playwright"
+      ? Object.values(pkg.scripts ?? {}).find((s) => /\bplaywright\b/.test(s))
+      : pkg.scripts?.test;
+  return parseScriptEnv(script);
 }
 
 export function buildCommand(runner, bin, resultsFile, reporterPath, extra) {
   const args = extra ? ` ${extra}` : "";
+  if (runner === "playwright") {
+    // Flagless on purpose: watch mode is env-gated (PWTEST_WATCH=1) and DROPS the
+    // CLI --reporter flag, but appends the reporter named in PW_TEST_REPORTER to
+    // every run — which reads its output path from PLAYWRIGHT_JSON_OUTPUT_NAME.
+    // startSession injects all three. Headless is playwright's default.
+    return `"${bin}" test${args}`;
+  }
   if (runner === "jest") {
     // `--watch` (not `--watchAll`) reruns only tests related to changed files and
     // runs nothing on a clean tree — it derives "changed" from git/hg, so it needs

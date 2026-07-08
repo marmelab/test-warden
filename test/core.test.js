@@ -11,6 +11,7 @@ import {
   resolveBin,
   parseScriptEnv,
   normalizeResults,
+  scriptEnv,
   slugFor,
 } from "../src/core.js";
 
@@ -68,6 +69,37 @@ test("buildCommand: vitest scopes startup to changed files and wires json output
   const cmd = buildCommand("vitest", "/bin/vitest", "/tmp/out.json", "/r.cjs", "src/foo");
   assert.match(cmd, /--watch --changed --reporter=default/);
   assert.match(cmd, /--reporter=json --outputFile="\/tmp\/out\.json" src\/foo$/);
+});
+
+test("buildCommand: playwright is flagless — watch and json ride on env", () => {
+  const cmd = buildCommand("playwright", "/bin/playwright", "/tmp/out.json", "/r.cjs");
+  assert.equal(cmd, '"/bin/playwright" test');
+  const withArgs = buildCommand("playwright", "/bin/playwright", "/tmp/out.json", "/r.cjs", "--project=chromium");
+  assert.equal(withArgs, '"/bin/playwright" test --project=chromium');
+});
+
+test("scriptEnv: playwright reads the e2e script's env, not the unit test's", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twm-senv-"));
+  fs.writeFileSync(
+    path.join(dir, "package.json"),
+    JSON.stringify({
+      scripts: {
+        test: "TZ=UTC vitest",
+        "test:e2e": "BASE_URL=http://localhost:4000 playwright test",
+      },
+    }),
+  );
+  assert.deepEqual(scriptEnv(dir), { TZ: "UTC" }); // unit: unchanged default
+  assert.deepEqual(scriptEnv(dir, "playwright"), {
+    BASE_URL: "http://localhost:4000",
+  });
+  // no playwright script → {} (not the unit script's env)
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "twm-senv-"));
+  fs.writeFileSync(
+    path.join(bare, "package.json"),
+    JSON.stringify({ scripts: { test: "TZ=UTC vitest" } }),
+  );
+  assert.deepEqual(scriptEnv(bare, "playwright"), {});
 });
 
 test("buildCommand: quotes paths with spaces", () => {
