@@ -513,5 +513,20 @@ server.registerTool(
   },
 );
 
+// Die with the client. The pty children keep the event loop alive, so without this a
+// finished session leaves a zombie server whose watchers keep rerunning tests on every
+// edit (colliding with the next session's runs — e.g. on a shared test database) and
+// whose .live markers lock the projects against the next session's server.
+function shutdown() {
+  for (const s of sessions.values()) {
+    s.proc.kill();
+    fs.rmSync(s.liveFile, { force: true });
+  }
+  process.exit(0);
+}
+process.stdin.on("end", shutdown); // client closed the pipe — the session is over
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
