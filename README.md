@@ -99,6 +99,26 @@ A second bundled hook, `nudge-watch.mjs` (matcher `Edit|Write`, also Claude Code
 }
 ```
 
+## Session lifecycle — one active session per project
+
+Warm watchers are real processes with real side effects (a suite that boots a database
+binds its port), so stale ones must never outlive their session. Three layers, newest
+session always wins:
+
+- **The server dies with its client.** When the session ends (stdin closes, or
+  SIGTERM/SIGINT), the server kills its watchers, removes their live markers, and
+  exits — no zombie keeps rerunning tests after the session is gone.
+- **`start_watch` takes over.** If another live server still watches the target dir
+  (a session you forgot open), the new server SIGTERMs it — triggering that same
+  cleanup — and starts its own watcher.
+- **A `SessionStart` hook surfaces leftovers up front.** `reset-watch.mjs` (matcher
+  `startup|resume`, wired by `init`) detects watchers other sessions still hold on
+  this project before the new session runs anything. It never kills by itself — the
+  other session may be a window you're still using — it tells the agent to ask you
+  first, explaining the caveat of keeping it (the old watcher auto-reruns tests on
+  every edit, colliding on shared resources like a fixed DB port). Markers of dead
+  servers are reaped silently.
+
 ## Limitations
 
 - PTY uses `node-pty`; Windows support follows node-pty's (works, but less exercised here).

@@ -176,7 +176,7 @@ async function startSession({ runner, bin, cwd, args, env }) {
       }
     }
   });
-  fs.writeFileSync(liveFile, String(process.pid));
+  fs.writeFileSync(liveFile, `${process.pid}\n${cwd}`); // see watcherAlive for the format
   lastStart.set(cwd, { runner, args, env }); // so an idle-killed watcher restarts faithfully
   const s = {
     proc,
@@ -250,15 +250,28 @@ async function startWatchCore({ runner, cwd, args, env }) {
   if (existing) {
     existing.proc.kill();
   } else {
-    // No local session, but another server process might already watch this dir.
+    // Another live server already watches this dir — typically a forgotten session's.
+    // Newest wins: two sessions can't run this project's tests concurrently anyway
+    // (suites bind fixed DB ports), and a duplicate file-watch on one tree is a real
+    // perf hit — so take the watch over instead of refusing. SIGTERM triggers the
+    // owner's shutdown(): it kills its watchers, reaps its markers, and exits.
+    // ponytail: SIGTERM kills the owner's watchers on OTHER dirs too — a server is
+    // one agent session, so its whole session is stale; per-dir eviction needs an
+    // IPC channel this doesn't have.
     const owner = watchedElsewhere(cwd);
-    if (owner)
-      return {
-        error:
-          `${cwd} is already watched by another test-warden (pid ${owner}). ` +
-          `Not starting a second watcher — a duplicate file-watch on the same ` +
-          `tree can grind the machine to a halt. Reuse that instance, or stop it first.`,
-      };
+    if (owner) {
+      try {
+        process.kill(owner, "SIGTERM");
+      } catch {
+        /* already gone */
+      }
+      const deadline = Date.now() + 5_000;
+      while (watchedElsewhere(cwd) && Date.now() < deadline) await sleep(50);
+      if (watchedElsewhere(cwd))
+        return {
+          error: `${cwd} is watched by another test-warden (pid ${owner}) that did not exit on SIGTERM — kill it manually.`,
+        };
+    }
   }
   try {
     return { session: await startSession({ runner: resolved, bin, cwd, args, env }) };

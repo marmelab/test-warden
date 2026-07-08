@@ -28,7 +28,9 @@ export function watcherAlive(dir, slug) {
   const live = path.join(dir, `test-warden-${slug}.live`);
   let pid;
   try {
-    pid = Number(fs.readFileSync(live, "utf8"));
+    // Marker format: "<pid>\n<cwd>" (the cwd lets the session-start reset hook scope
+    // eviction to one project); older versions wrote the pid alone.
+    pid = Number(fs.readFileSync(live, "utf8").split("\n")[0]);
   } catch {
     return 0; // no marker — not watched
   }

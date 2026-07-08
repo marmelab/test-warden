@@ -23,16 +23,24 @@ test("init merges, preserves existing keys, and is idempotent", () => {
   assert.ok(mcp.mcpServers.other, "kept existing mcp server");
   assert.equal(mcp.mcpServers["test-warden"].command, "npx");
 
-  const post = read(dir, ".claude/settings.json").hooks.PostToolUse;
-  assert.equal(post.length, 3, "kept existing hook, added notify + nudge");
+  const hooks = read(dir, ".claude/settings.json").hooks;
+  assert.equal(hooks.PostToolUse.length, 3, "kept existing hook, added notify + nudge");
   assert.ok(
-    post.some((g) => g.matcher === "Edit|Write"),
+    hooks.PostToolUse.some((g) => g.matcher === "Edit|Write"),
     "added the Edit|Write nudge hook",
   );
+  assert.equal(hooks.SessionStart.length, 1, "added the session reset hook");
+  assert.equal(hooks.SessionStart[0].matcher, "startup|resume");
 
   // Hook files copied into the project, with the core.js import rewritten.
   const hookDir = path.join(dir, ".claude/hooks/test-warden");
-  for (const f of ["notify-on-fail.mjs", "nudge-watch.mjs", "emit.mjs", "core.js"]) {
+  for (const f of [
+    "notify-on-fail.mjs",
+    "nudge-watch.mjs",
+    "reset-watch.mjs",
+    "emit.mjs",
+    "core.js",
+  ]) {
     assert.ok(fs.existsSync(path.join(hookDir, f)), `copied ${f}`);
   }
   const nudge = fs.readFileSync(path.join(hookDir, "nudge-watch.mjs"), "utf8");
@@ -41,5 +49,7 @@ test("init merges, preserves existing keys, and is idempotent", () => {
 
   // Second run adds nothing.
   run(dir);
-  assert.equal(read(dir, ".claude/settings.json").hooks.PostToolUse.length, 3);
+  const again = read(dir, ".claude/settings.json").hooks;
+  assert.equal(again.PostToolUse.length, 3);
+  assert.equal(again.SessionStart.length, 1);
 });

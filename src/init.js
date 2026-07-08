@@ -12,14 +12,21 @@ const DEST = ".claude/hooks/test-warden";
 const COPIES = [
   [path.join(HOOKS, "notify-on-fail.mjs"), "notify-on-fail.mjs"],
   [path.join(HOOKS, "nudge-watch.mjs"), "nudge-watch.mjs"],
+  [path.join(HOOKS, "reset-watch.mjs"), "reset-watch.mjs"],
   [path.join(HOOKS, "emit.mjs"), "emit.mjs"],
   [path.join(HERE, "core.js"), "core.js"],
 ];
 // notify: surface failing runs (any tool). nudge: offer to start a watch on edit.
-const POST_HOOKS = [
-  { matcher: "*", command: `node "$CLAUDE_PROJECT_DIR/${DEST}/notify-on-fail.mjs"` },
-  { matcher: "Edit|Write", command: `node "$CLAUDE_PROJECT_DIR/${DEST}/nudge-watch.mjs"` },
-];
+// reset: on session start/resume, evict watchers left by previous sessions.
+const HOOKS_BY_EVENT = {
+  PostToolUse: [
+    { matcher: "*", command: `node "$CLAUDE_PROJECT_DIR/${DEST}/notify-on-fail.mjs"` },
+    { matcher: "Edit|Write", command: `node "$CLAUDE_PROJECT_DIR/${DEST}/nudge-watch.mjs"` },
+  ],
+  SessionStart: [
+    { matcher: "startup|resume", command: `node "$CLAUDE_PROJECT_DIR/${DEST}/reset-watch.mjs"` },
+  ],
+};
 
 // Read JSON (or {} if absent/empty), apply `merge`, write back pretty-printed.
 function patchJson(file, merge) {
@@ -53,19 +60,19 @@ export function run(cwd = process.cwd()) {
     },
   }));
 
-  // 2) Add the PostToolUse hooks (Claude Code), skipping any already present.
+  // 2) Add the hooks (Claude Code), per event, skipping any already present.
   patchJson(path.join(cwd, ".claude", "settings.json"), (c) => {
-    const post = c.hooks?.PostToolUse ?? [];
-    const has = (cmd) => post.some((g) => g.hooks?.some((h) => h.command === cmd));
-    const additions = POST_HOOKS.filter((h) => !has(h.command)).map((h) => ({
-      matcher: h.matcher,
-      hooks: [{ type: "command", command: h.command }],
-    }));
-    if (!additions.length) return c;
-    return {
-      ...c,
-      hooks: { ...c.hooks, PostToolUse: [...post, ...additions] },
-    };
+    const hooks = { ...c.hooks };
+    for (const [event, wanted] of Object.entries(HOOKS_BY_EVENT)) {
+      const cur = hooks[event] ?? [];
+      const has = (cmd) => cur.some((g) => g.hooks?.some((h) => h.command === cmd));
+      const additions = wanted.filter((h) => !has(h.command)).map((h) => ({
+        matcher: h.matcher,
+        hooks: [{ type: "command", command: h.command }],
+      }));
+      if (additions.length) hooks[event] = [...cur, ...additions];
+    }
+    return { ...c, hooks };
   });
 
   console.log(

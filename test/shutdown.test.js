@@ -52,33 +52,55 @@ function nextResponse(proc, id, timeoutMs) {
   });
 }
 
-test("closing stdin kills the server, its watcher, and the live marker", async () => {
-  const server = spawn(process.execPath, [path.join(ROOT, "src", "index.js")], {
+const spawnServer = () =>
+  spawn(process.execPath, [path.join(ROOT, "src", "index.js")], {
     stdio: ["pipe", "pipe", "inherit"],
   });
-  try {
-    rpc(server, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: { name: "test", version: "0" },
-      },
-    });
-    await nextResponse(server, 1, 10_000);
-    rpc(server, { jsonrpc: "2.0", method: "notifications/initialized" });
-    rpc(server, {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "tools/call",
-      params: { name: "start_watch", arguments: { cwd: DEMO } },
-    });
-    const res = await nextResponse(server, 2, 90_000); // vitest cold start
-    assert.match(res.result.content[0].text, /Started vitest watch/);
 
-    const liveFile = path.join(os.tmpdir(), `test-warden-${slugFor(DEMO)}.live`);
+async function boot(server) {
+  rpc(server, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test", version: "0" },
+    },
+  });
+  await nextResponse(server, 1, 10_000);
+  rpc(server, { jsonrpc: "2.0", method: "notifications/initialized" });
+}
+
+async function startWatch(server) {
+  rpc(server, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "start_watch", arguments: { cwd: DEMO } },
+  });
+  const res = await nextResponse(server, 2, 90_000); // vitest cold start
+  return res.result.content[0].text;
+}
+
+const exitOf = (proc, ms) =>
+  proc.exitCode !== null
+    ? Promise.resolve(proc.exitCode)
+    : Promise.race([
+        new Promise((r) => proc.on("exit", r)),
+        new Promise((r) => setTimeout(() => r("zombie"), ms)),
+      ]);
+
+const LIVE_FILE = path.join(os.tmpdir(), `test-warden-${slugFor(DEMO)}.live`);
+const markerPid = () => Number(fs.readFileSync(LIVE_FILE, "utf8").split("\n")[0]);
+
+test("closing stdin kills the server, its watcher, and the live marker", async () => {
+  const server = spawnServer();
+  try {
+    await boot(server);
+    assert.match(await startWatch(server), /Started vitest watch/);
+
+    const liveFile = LIVE_FILE;
     assert.ok(fs.existsSync(liveFile), "live marker written");
     // The watcher is the server's `sh -c vitest ...` child.
     const watcherPid = Number(
@@ -87,11 +109,7 @@ test("closing stdin kills the server, its watcher, and the live marker", async (
     assert.ok(alive(watcherPid), "watcher running");
 
     server.stdin.end(); // the client goes away
-    const code = await Promise.race([
-      new Promise((r) => server.on("exit", r)),
-      new Promise((r) => setTimeout(() => r("zombie"), 15_000)),
-    ]);
-    assert.equal(code, 0);
+    assert.equal(await exitOf(server, 15_000), 0);
     assert.ok(!fs.existsSync(liveFile), "live marker reaped");
     // pty child gets killed on shutdown; give the signal a beat to land.
     for (let i = 0; i < 50 && alive(watcherPid); i++)
@@ -99,5 +117,24 @@ test("closing stdin kills the server, its watcher, and the live marker", async (
     assert.ok(!alive(watcherPid), "watcher process gone");
   } finally {
     if (server.exitCode === null) server.kill("SIGKILL");
+  }
+});
+
+test("start_watch takes the watch over from a forgotten live server (newest wins)", async () => {
+  const a = spawnServer();
+  const b = spawnServer();
+  try {
+    await boot(a);
+    assert.match(await startWatch(a), /Started vitest watch/);
+    assert.equal(markerPid(), a.pid, "first server owns the watch");
+
+    // Second session starts while the first is still alive and holding the watch.
+    await boot(b);
+    assert.match(await startWatch(b), /Started vitest watch/);
+    assert.equal(markerPid(), b.pid, "second server took the watch over");
+    assert.equal(await exitOf(a, 15_000), 0, "evicted server exited cleanly");
+  } finally {
+    for (const p of [a, b]) if (p.exitCode === null) p.kill("SIGKILL");
+    fs.rmSync(LIVE_FILE, { force: true });
   }
 });
