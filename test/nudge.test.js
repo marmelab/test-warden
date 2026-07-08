@@ -14,18 +14,24 @@ const HOOK = path.join(
   "nudge-watch.mjs",
 );
 
-// Build a temp monorepo: <root>/packages/api uses vitest; <root>/loose has no runner.
+// Build a temp monorepo driven by test-warden.config.js: <root>/packages/api is the
+// only configured dir; <root>/loose has a vitest package.json but NO config entry —
+// proving the nudge follows the config, not detection.
 function makeRepo() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "twm-nudge-"));
+  fs.writeFileSync(
+    path.join(root, "test-warden.config.js"),
+    'module.exports = [{ dir: "packages/api", runner: "vitest" }];',
+  );
   const api = path.join(root, "packages", "api", "src");
   fs.mkdirSync(api, { recursive: true });
-  fs.writeFileSync(
-    path.join(root, "packages", "api", "package.json"),
-    JSON.stringify({ devDependencies: { vitest: "^1" } }),
-  );
   fs.writeFileSync(path.join(api, "x.ts"), "");
   const loose = path.join(root, "loose");
   fs.mkdirSync(loose, { recursive: true });
+  fs.writeFileSync(
+    path.join(loose, "package.json"),
+    JSON.stringify({ devDependencies: { vitest: "^1" } }),
+  );
   fs.writeFileSync(path.join(loose, "y.ts"), "");
   return { root, apiFile: path.join(api, "x.ts"), looseFile: path.join(loose, "y.ts") };
 }
@@ -44,7 +50,7 @@ const liveMarker = (tmp, cwd) =>
     `test-warden-${crypto.createHash("sha1").update(cwd).digest("hex").slice(0, 8)}.live`,
   );
 
-test("nudges to start_watch for the edited package, and keeps nudging until watched", () => {
+test("nudges to start_watch for the edited configured dir, and keeps nudging until watched", () => {
   const { apiFile } = makeRepo();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-nudge-tmp-"));
 
@@ -58,13 +64,27 @@ test("nudges to start_watch for the edited package, and keeps nudging until watc
   assert.match(run(tmp, apiFile), /start_watch/);
 });
 
-test("silent for a file outside any jest/vitest package", () => {
+test("silent for a file outside every configured dir — even one detection would match", () => {
   const { looseFile } = makeRepo();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-nudge-tmp-"));
+  // loose/ has a vitest package.json but no config entry: no detection fallback.
   assert.equal(run(tmp, looseFile).trim(), "");
 });
 
-test("silent when a live watcher marker exists for that package", () => {
+test("surfaces an invalid config to the agent instead of nudging", () => {
+  const { root, apiFile } = makeRepo();
+  fs.writeFileSync(
+    path.join(root, "test-warden.config.js"),
+    'module.exports = [{ dir: "packages/api", runner: "mocha" }];',
+  );
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-nudge-tmp-"));
+  const ctx = JSON.parse(run(tmp, apiFile)).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /Invalid .*test-warden\.config\.js/);
+  assert.match(ctx, /runner/);
+  assert.doesNotMatch(ctx, /start_watch \{/);
+});
+
+test("silent when a live watcher marker exists for that dir", () => {
   const { root, apiFile } = makeRepo();
   const cwd = path.join(root, "packages", "api");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-nudge-tmp-"));

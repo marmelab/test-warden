@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-// Claude Code PostToolUse hook on Edit|Write: when you edit a file in a jest/vitest
-// package that isn't being watched yet, nudge the agent to start_watch for that
-// package. Fires once per package dir; silent if already watching or not a test package.
+// Claude Code PostToolUse hook on Edit|Write: when you edit a file inside a dir that
+// test-warden.config.js declares testable but that isn't being watched yet, nudge the
+// agent to start_watch it. The config is the only source of truth (no detection):
+// silent when the file is outside every configured dir or no config exists up the
+// tree; an INVALID config is surfaced to the agent — it can fix it.
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import { detectRunner, slugFor, watcherAlive } from "../src/core.js";
+import { loadConfig, slugFor, watcherAlive } from "../src/core.js";
 import { emitContext } from "./emit.mjs";
 
 const DIR = process.env.TEST_WATCH_MCP_TMP || os.tmpdir();
@@ -19,34 +21,43 @@ try {
 }
 if (!file) process.exit(0);
 
-// Walk up from the file to the nearest package that uses jest/vitest.
-function findPackage(start) {
+// Deepest config entry whose dir contains the edited file. Walks up to the nearest
+// test-warden.config.js (validated by loadConfig — same schema the server enforces).
+async function findEntry(start) {
   for (let dir = path.dirname(start); ; dir = path.dirname(dir)) {
-    if (fs.existsSync(path.join(dir, "package.json"))) {
-      let runner;
-      try {
-        runner = detectRunner(dir);
-      } catch {
-        runner = "ambiguous"; // both present — agent must pass runner
-      }
-      if (runner) return { cwd: dir, runner };
+    if (fs.existsSync(path.join(dir, "test-warden.config.js"))) {
+      const entries = await loadConfig(dir); // throws on invalid — caught below
+      return entries
+        .filter((e) => (start + path.sep).startsWith(e.dir + path.sep))
+        .sort((a, b) => b.dir.length - a.dir.length)[0];
     }
-    if (path.dirname(dir) === dir) return null; // hit filesystem root
+    if (path.dirname(dir) === dir) return null; // hit filesystem root — no config
   }
 }
 
-const pkg = findPackage(file);
-if (!pkg) process.exit(0); // not inside a jest/vitest package
+// Config entry dirs are realpath'd (loadConfig), so realpath the file to match.
+let real = file;
+try {
+  real = fs.realpathSync(file);
+} catch {
+  /* freshly-written path oddity — use as-is */
+}
+
+let entry;
+try {
+  entry = await findEntry(real);
+} catch (e) {
+  // Broken config: the server would refuse this too — tell the agent so it gets fixed.
+  emitContext(`🛡️ test-warden: ${e.message}`);
+  process.exit(0);
+}
+if (!entry) process.exit(0); // outside every configured dir
 
 // Re-checking liveness every edit (not nudging once) is what makes this reliable.
-if (watcherAlive(DIR, slugFor(pkg.cwd))) process.exit(0); // already watched — don't nudge
+if (watcherAlive(DIR, slugFor(entry.dir))) process.exit(0); // already watched
 
-const runnerNote =
-  pkg.runner === "ambiguous"
-    ? "jest and vitest are both present — pass runner explicitly"
-    : `runner: ${pkg.runner}`;
 emitContext(
-  `🛡️ test-warden: tests in ${pkg.cwd} aren't being watched. ` +
-    `Call start_watch { cwd: "${pkg.cwd}" } (${runnerNote}) for warm, fast test runs as you edit.`,
+  `🛡️ test-warden: tests in ${entry.dir} aren't being watched. ` +
+    `Call start_watch { cwd: "${entry.dir}" } (runner: ${entry.runner}) for warm, fast test runs as you edit.`,
 );
 process.exit(0);

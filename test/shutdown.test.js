@@ -52,8 +52,10 @@ function nextResponse(proc, id, timeoutMs) {
   });
 }
 
+// cwd matters now: the server requires a valid test-warden.config.js in its cwd.
 const spawnServer = () =>
   spawn(process.execPath, [path.join(ROOT, "src", "index.js")], {
+    cwd: DEMO,
     stdio: ["pipe", "pipe", "inherit"],
   });
 
