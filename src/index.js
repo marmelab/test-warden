@@ -499,14 +499,15 @@ server.registerTool(
     inputSchema: cwdArg,
   },
   async ({ cwd }) => {
-    const targets = cwd
-      ? [sessions.get(cwd)].filter(Boolean)
-      : [...sessions.values()];
-    if (!targets.length)
-      return text(cwd ? `No session for ${cwd}.` : "No session running.");
+    // pick() realpaths cwd so a symlink/trailing-slash spelling still finds the session.
+    const targets = cwd ? [pick(cwd)] : [...sessions.values()];
+    if (!targets.length) return text("No session running.");
     for (const s of targets) {
       s.proc.kill();
       sessions.delete(s.cwd);
+      // onExit's cleanup is guarded by `sessions.get(cwd) === s`, which the delete
+      // above just broke — reap the live marker here or it outlives the session.
+      fs.rmSync(s.liveFile, { force: true });
     }
     return text(`Stopped: ${targets.map((s) => s.cwd).join(", ")}.`);
   },
