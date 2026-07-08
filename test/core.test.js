@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildCommand,
+  detectPlaywright,
   detectRunner,
+  playwrightTestDir,
   resolveBin,
   parseScriptEnv,
   normalizeResults,
@@ -99,6 +101,46 @@ test("detectRunner: from deps, config files, neither, and ambiguous", () => {
   assert.equal(detectRunner(mk(() => {})), null); // no package.json at all
   // both → throws so the caller asks for an explicit runner
   assert.throws(() => detectRunner(mk((d) => pkg(d, { devDependencies: { jest: "^29", vitest: "^1" } }))), /both/i);
+});
+
+test("detectPlaywright: dep or config file, independent of the unit runner", () => {
+  const mk = (setup) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twm-pw-"));
+    setup(dir);
+    return dir;
+  };
+  const pkg = (dir, obj) =>
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(obj));
+
+  assert.equal(detectPlaywright(mk((d) => pkg(d, { devDependencies: { "@playwright/test": "^1" } }))), true);
+  assert.equal(detectPlaywright(mk((d) => fs.writeFileSync(path.join(d, "playwright.config.ts"), ""))), true);
+  assert.equal(detectPlaywright(mk((d) => pkg(d, { devDependencies: { vitest: "^1" } }))), false);
+  assert.equal(detectPlaywright(mk(() => {})), false);
+  // coexistence: playwright alongside a unit runner is NOT ambiguous —
+  // detectRunner still answers for the unit side, detectPlaywright for e2e
+  const both = mk((d) =>
+    pkg(d, { devDependencies: { vitest: "^1", "@playwright/test": "^1" } }),
+  );
+  assert.equal(detectPlaywright(both), true);
+  assert.equal(detectRunner(both), "vitest");
+});
+
+test("playwrightTestDir: extracts a literal testDir, else null", () => {
+  const mk = (name, content) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twm-pwdir-"));
+    if (name) fs.writeFileSync(path.join(dir, name), content);
+    return dir;
+  };
+  // double quotes, single quotes, ts config
+  let d = mk("playwright.config.js", 'export default defineConfig({ testDir: "./e2e" });');
+  assert.equal(playwrightTestDir(d), path.join(d, "e2e"));
+  d = mk("playwright.config.ts", "export default defineConfig({\n  testDir: './tests/e2e',\n});");
+  assert.equal(playwrightTestDir(d), path.join(d, "tests/e2e"));
+  // no testDir literal (computed or absent) → null
+  assert.equal(playwrightTestDir(mk("playwright.config.js", "export default {}")), null);
+  assert.equal(playwrightTestDir(mk("playwright.config.js", "const dir = x; export default { testDir: dir }")), null);
+  // no config at all → null
+  assert.equal(playwrightTestDir(mk(null)), null);
 });
 
 test("resolveBin: walks up to a hoisted node_modules/.bin", () => {

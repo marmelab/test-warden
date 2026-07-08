@@ -72,6 +72,47 @@ export function detectRunner(cwd) {
   return vitest ? "vitest" : jest ? "jest" : null;
 }
 
+// Does the project at `cwd` use Playwright? Deliberately separate from
+// detectRunner: playwright coexists with a unit runner (unit + e2e side by side is
+// the normal setup), so its presence is never "ambiguous" — it's a second watchable
+// runner, keyed apart by slugFor(cwd, runner).
+export function detectPlaywright(cwd) {
+  let pkg = {};
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"));
+  } catch {
+    /* no/unreadable package.json — fall through to config-file check */
+  }
+  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+  return (
+    "@playwright/test" in deps ||
+    ["js", "ts", "mjs", "cjs", "mts", "cts"].some((e) =>
+      fs.existsSync(path.join(cwd, `playwright.config.${e}`)),
+    )
+  );
+}
+
+// Absolute testDir from cwd's playwright config, or null. Location is how
+// playwright itself decides what's a test, and most specs don't import
+// @playwright/test directly (custom fixtures modules are the norm) — so the nudge
+// hook checks this first, content second.
+// ponytail: regex over an executable config — a computed/imported testDir isn't
+// followed (returns null, nudge falls back to the content sniff); upgrade path is
+// a one-hop relative-import sniff.
+export function playwrightTestDir(cwd) {
+  for (const e of ["js", "ts", "mjs", "cjs", "mts", "cts"]) {
+    let src;
+    try {
+      src = fs.readFileSync(path.join(cwd, `playwright.config.${e}`), "utf8");
+    } catch {
+      continue;
+    }
+    const m = /testDir\s*:\s*['"]([^'"]+)['"]/.exec(src);
+    return m ? path.resolve(cwd, m[1]) : null;
+  }
+  return null;
+}
+
 // Absolute path to the runner binary, searching node_modules/.bin from cwd upward
 // so hoisted monorepos (bin at the workspace root) resolve too. null if not found.
 export function resolveBin(cwd, runner) {
