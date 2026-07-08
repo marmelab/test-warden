@@ -4,18 +4,22 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-// Stable per-project key. realpath collapses symlinks, `..`, and trailing slashes,
+// Stable per-watch key. realpath collapses symlinks, `..`, and trailing slashes,
 // so the same directory spelled two ways yields ONE slug — one watcher, one results
-// file, one lock. Used by both the server and the nudge hook, so they must agree:
-// hence shared here. Falls back to the raw path if the dir is missing (can't be
-// watched anyway) to keep the slug deterministic.
-export function slugFor(cwd) {
+// file, one lock. The runner is part of the key because a unit runner and playwright
+// legitimately coexist in one package as separate watch sessions. Used by both the
+// server and the hooks, so they must agree: hence shared here. Falls back to the raw
+// path if the dir is missing (can't be watched anyway) to keep the slug
+// deterministic. Omitting runner reproduces the legacy runner-less slug (only used
+// to match markers left by old versions).
+export function slugFor(cwd, runner) {
   let real = cwd;
   try {
     real = fs.realpathSync(cwd);
   } catch {
     /* missing dir */
   }
+  if (runner) real += `\0${runner}`;
   return crypto.createHash("sha1").update(real).digest("hex").slice(0, 8);
 }
 

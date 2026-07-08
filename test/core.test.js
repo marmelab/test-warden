@@ -23,6 +23,16 @@ test("slugFor: same dir via trailing slash or symlink yields one slug", () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test("slugFor: same dir + different runner yields distinct, stable slugs", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tw-slug-"));
+  const unit = slugFor(dir, "vitest");
+  const e2e = slugFor(dir, "playwright");
+  assert.notEqual(unit, e2e); // one watcher per (cwd, runner) pair
+  assert.notEqual(unit, slugFor(dir)); // runner-less (legacy) slug is its own key
+  assert.equal(slugFor(`${dir}/`, "vitest"), unit); // canonicalization still applies
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("parseScriptEnv: pulls leading env assignments off the test script", () => {
   assert.deepEqual(parseScriptEnv("TZ=UTC jest"), { TZ: "UTC" });
   assert.deepEqual(parseScriptEnv("TZ=UTC LANG=en_US vitest run"), {
