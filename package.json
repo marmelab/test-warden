@@ -1,7 +1,7 @@
 {
   "name": "test-warden",
   "version": "0.1.1",
-  "description": "MCP server to pilot jest/vitest watch mode over a PTY, so coding agents get warm, fast, on-demand test runs.",
+  "description": "MCP server to pilot jest/vitest/playwright watch mode over a PTY, so coding agents get warm, fast, on-demand test runs.",
   "type": "module",
   "bin": {
     "test-warden": "src/index.js"
@@ -22,6 +22,7 @@
   "keywords": [
     "mcp",
     "jest",
+    "playwright",
     "vitest",
     "watch",
     "testing",

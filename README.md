@@ -1,10 +1,10 @@
 # test-warden
 
-An MCP server that keeps a **jest** or **vitest** watch process warm and lets a coding agent pilot it: rerun all, rerun failed, filter by file/test name, and read structured results — without paying cold-start on every run.
+An MCP server that keeps a **jest**, **vitest** or **playwright** (headless e2e) watch process warm and lets a coding agent pilot it: rerun all, rerun failed, filter by file/test name, and read structured results — without paying cold-start on every run.
 
 ## Why
 
-Agents normally run `jest` / `vitest run` fresh each time, eating the full cold start (transform + module graph) on every check. Watch mode keeps that warm, but its command channel is keyboard-only and dies without a TTY. This server gives the watcher a real PTY (via `node-pty`) and exposes the commands as MCP tools, so the agent gets watch-mode speed through normal tool calls.
+Agents normally run `jest` / `vitest run` / `playwright test` fresh each time, eating the full cold start (transform + module graph, browser launch) on every check. Watch mode keeps that warm, but its command channel is keyboard-only and dies without a TTY. This server gives the watcher a real PTY (via `node-pty`) and exposes the commands as MCP tools, so the agent gets watch-mode speed through normal tool calls.
 
 ## Install
 
@@ -38,19 +38,19 @@ Or configure manually:
 
 | Tool           | Args                                        | Does                                                             |
 | -------------- | ------------------------------------------- | ---------------------------------------------------------------- |
-| `start_watch`  | `cwd`, `runner?` (`jest`\|`vitest`), `args?`, `env?` | Launch a warm watch session in `cwd`. Runner auto-detected from `cwd`'s `package.json`; pass `runner` only to override. |
+| `start_watch`  | `cwd`, `runner?` (`jest`\|`vitest`\|`playwright`), `args?`, `env?` | Launch a warm watch session in `cwd`. Runner auto-detected from `cwd`'s `package.json`; pass `runner` when a package has several (e.g. vitest + playwright). |
 | `run_all`      | `cwd?`                                       | Rerun the whole suite.                                           |
 | `run_failed`   | `cwd?`                                       | Rerun only previously failed tests.                             |
 | `run_filtered` | `pattern`, `by` (`path`\|`name`), `cwd?`     | Rerun tests matching a filter.                                   |
 | `get_results`  | `cwd?`                                       | Latest run as JSON: `{ total, passed, failed, ok, failures[] }`. |
 | `tail_log`     | `cwd?`                                       | Recent raw watcher output (debugging).                           |
-| `stop_watch`   | `cwd?`                                       | Stop one session, or all when `cwd` is omitted.                 |
+| `stop_watch`   | `cwd?`, `runner?`                            | Stop a dir's sessions (all of them unless `runner` narrows it), or everything when `cwd` is omitted. |
 
-`get_results` reads jest's `AggregatedResult` (via a bundled reporter) and vitest's `--reporter=json` — normalized to the same shape.
+`get_results` reads jest's `AggregatedResult` (via a bundled reporter), vitest's `--reporter=json`, and playwright's json reporter — normalized to the same shape.
 
 **Env vars:** tests often rely on env set in the `test` script (e.g. `"test": "TZ=UTC jest"` for stable dates). Since the server launches the runner binary directly, it reads those inline assignments (including a `cross-env` prefix) from the project's `test` script and applies them — so you don't get false negatives. Env set inside jest/vitest *config* already works. For file-loaded vars (dotenv-cli, env-cmd) or one-off overrides, pass `env` to `start_watch`.
 
-**Monorepos:** one warm session per `cwd`, so you can watch several at once (e.g. `mobile` on jest and `api` on vitest concurrently). The runner is detected per-`cwd`, and the binary is resolved from `node_modules/.bin` walking up to the workspace root (so hoisted installs resolve). The `cwd` arg on the other tools picks which session — omit it when only one is running. The failure hook reports each workspace independently, so a green run in one never hides a red run in another.
+**Monorepos:** one warm session per (`cwd`, runner) pair, so you can watch several at once (e.g. `mobile` on jest and `api` on vitest concurrently) — including a package's unit runner and playwright side by side. The other tools take `runner` alongside `cwd` to pick a session when one dir watches both. The runner is detected per-`cwd`, and the binary is resolved from `node_modules/.bin` walking up to the workspace root (so hoisted installs resolve). The `cwd` arg on the other tools picks which session — omit it when only one is running. The failure hook reports each workspace independently, so a green run in one never hides a red run in another.
 
 ## Failure notifications (optional)
 
@@ -88,7 +88,7 @@ Fires once per failing run (deduped by results-file mtime); silent while green. 
 
 ## Auto-start on edit (optional)
 
-A second bundled hook, `nudge-watch.mjs` (matcher `Edit|Write`, also Claude Code specific), removes the "did I start the watcher?" step: when you edit a file inside a jest/vitest package that isn't being watched, it nudges the agent to call `start_watch` for that exact package (cwd + detected runner). A hook can't call an MCP tool or reach the server's in-memory session, so it can't start the watcher itself — it prompts the agent, which then makes the call. Fires once per package dir; silent if a watcher for it already exists or the file isn't in a test package. `npx test-warden init` wires it up:
+A second bundled hook, `nudge-watch.mjs` (matcher `Edit|Write`, also Claude Code specific), removes the "did I start the watcher?" step: when you edit a file inside a jest/vitest/playwright package that isn't being watched, it nudges the agent to call `start_watch` for that exact package (cwd + detected runner). A hook can't call an MCP tool or reach the server's in-memory session, so it can't start the watcher itself — it prompts the agent, which then makes the call. Fires once per package dir; silent if a watcher for it already exists or the file isn't in a test package. `npx test-warden init` wires it up:
 
 ```jsonc
 {
@@ -127,3 +127,9 @@ session always wins:
 ## License
 
 MIT
+
+## Playwright notes
+
+- Uses playwright's (experimental, env-gated) terminal watch mode; tests run **headless** by default, and the app under test stays warm across reruns via playwright's `webServer`.
+- A playwright test is recognized by location (the literal `testDir` in `playwright.config.*`) first, then by an `@playwright/test` import — so specs built on custom fixtures modules are covered.
+- `run_all` transparently clears the watch-mode filters a previous `run_filtered` set (they persist across runs in playwright's watch UI).
