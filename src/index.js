@@ -144,12 +144,26 @@ async function startSession({ runner, bin, cwd, args, env }) {
     },
   });
   const log = [];
+  // Keystrokes written before the runner's watch UI is up are silently lost, so
+  // run_* must wait for readiness. The runner's own output is the signal: each
+  // prints its idle-prompt marker once (and only once) it accepts keys.
+  let readyResolve;
+  const ready = new Promise((r) => (readyResolve = r));
+  const READY = /Waiting for file changes|Watch Usage/; // vitest | jest idle prompt
+  let tail = "";
   proc.onData((d) => {
     log.push(d);
     if (log.length > 400) log.splice(0, log.length - 400);
+    if (readyResolve) {
+      tail = (tail + d).slice(-1000); // rolling window; marker may span chunks
+      if (READY.test(tail)) {
+        readyResolve(true);
+        readyResolve = null;
+      }
+    }
   });
   fs.writeFileSync(liveFile, String(process.pid));
-  const s = { proc, runner, cwd, resultsFile, liveFile, log, triggeredMtime: 0 };
+  const s = { proc, runner, cwd, resultsFile, liveFile, log, ready, triggeredMtime: 0 };
   proc.onExit(() => {
     // Guarded: a restart (kill old → start new) writes the new marker before the
     // old proc's exit fires, so only the still-current session clears it.
@@ -160,6 +174,7 @@ async function startSession({ runner, bin, cwd, args, env }) {
   });
   // File was just deleted (mtime 0), so the watcher's initial run counts as fresh.
   sessions.set(cwd, s);
+  return s;
 }
 
 // Read whichever reporter wrote results and normalize to a compact summary.
@@ -176,6 +191,109 @@ function readResults(s) {
     return null; // mid-write
   }
 }
+
+// Start (or restart) a watch for cwd. Returns { session } on success, or { error } —
+// a ready-to-show message — on any failure: bad dir, no/ambiguous runner, not
+// installed, already watched by another process, or native addon missing. Shared by
+// start_watch and the run_* tools' auto-start.
+async function startWatchCore({ runner, cwd, args, env }) {
+  // Canonicalize first: the same dir spelled two ways (symlink, trailing slash, `..`)
+  // must be one session/one watcher, not two.
+  try {
+    cwd = fs.realpathSync(cwd);
+  } catch {
+    /* missing dir — detectRunner/resolveBin below give the clear error */
+  }
+  let resolved = runner;
+  if (!resolved) {
+    try {
+      resolved = detectRunner(cwd);
+    } catch (e) {
+      return { error: e.message }; // both detected — ask the agent to specify
+    }
+    if (!resolved)
+      return {
+        error: `No jest or vitest found in ${cwd}. This server only drives those two runners.`,
+      };
+  }
+  const bin = resolveBin(cwd, resolved);
+  if (!bin)
+    return {
+      error: `${resolved} is not installed in ${cwd} (no node_modules/.bin/${resolved}). Install deps first.`,
+    };
+  const existing = sessions.get(cwd); // restart only this cwd's watcher
+  if (existing) {
+    existing.proc.kill();
+  } else {
+    // No local session, but another server process might already watch this dir.
+    const owner = watchedElsewhere(cwd);
+    if (owner)
+      return {
+        error:
+          `${cwd} is already watched by another test-warden (pid ${owner}). ` +
+          `Not starting a second watcher — a duplicate file-watch on the same ` +
+          `tree can grind the machine to a halt. Reuse that instance, or stop it first.`,
+      };
+  }
+  try {
+    return { session: await startSession({ runner: resolved, bin, cwd, args, env }) };
+  } catch (e) {
+    return { error: e.message }; // e.g. node-pty not compiled — actionable, not a hang
+  }
+}
+
+// Resolve the run_* target: reuse the live session, or auto-start one so run_* work
+// even before start_watch was called. Returns { session } or { error }.
+async function ensureSession(cwd) {
+  try {
+    return { session: pick(cwd) }; // existing: explicit cwd, or the sole session
+  } catch (e) {
+    // Can only auto-start with a concrete cwd; without one, point at how to proceed.
+    if (!cwd)
+      return {
+        error:
+          sessions.size === 0
+            ? "No watch running and no cwd given — pass cwd to auto-start a watch here."
+            : e.message, // multiple sessions active — pick() already says "pass cwd"
+      };
+  }
+  return startWatchCore({ cwd }); // auto-detect runner, start, return {session}|{error}
+}
+
+// Block until the watch's in-flight run lands, rather than returning pending and making
+// the agent poll. Trust the JSON only once its mtime advanced past the trigger (a fresh
+// run) and it parses (not mid-write). Returns the summary, or null if still running.
+// ponytail: 30s ceiling so we return before a typical MCP client request timeout; bump
+// it or make it an arg if a suite legitimately runs longer.
+async function waitForResults(s) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const res = resultsMtime(s) > s.triggeredMtime ? readResults(s) : null;
+    if (res) return res;
+    await sleep(100);
+  }
+  return null;
+}
+
+// Wait until the watcher accepts keystrokes (its idle prompt appeared). True when
+// ready; false if it never got there — the caller should point at tail_log.
+// ponytail: 60s boot ceiling; a big suite's cold start can exceed it — bump if seen.
+async function awaitReady(s) {
+  return Promise.race([s.ready, sleep(60_000).then(() => false)]);
+}
+
+const notReadyText = (s) =>
+  text(
+    `The ${s.runner} watcher in ${s.cwd} is still starting up — not accepting commands yet. Check tail_log for what it's doing.`,
+  );
+
+const resultsText = (res) =>
+  text(
+    res
+      ? JSON.stringify(res, null, 2)
+      : JSON.stringify({ pending: true }, null, 2) +
+          "\n// Still running after 30s — retry, or check tail_log.",
+  );
 
 // --- MCP server -------------------------------------------------------------
 const server = new McpServer({ name: "test-warden", version: "0.1.0" });
@@ -208,51 +326,13 @@ server.registerTool(
     },
   },
   async ({ runner, cwd, args, env }) => {
-    // Canonicalize first: the same dir spelled two ways (symlink, trailing slash,
-    // `..`) must be one session/one watcher, not two.
-    try {
-      cwd = fs.realpathSync(cwd);
-    } catch {
-      /* missing dir — detectRunner/resolveBin below give the clear error */
-    }
-    let resolved = runner;
-    if (!resolved) {
-      try {
-        resolved = detectRunner(cwd);
-      } catch (e) {
-        return text(e.message); // both detected — ask the agent to specify
-      }
-      if (!resolved)
-        return text(
-          `No jest or vitest found in ${cwd}. This server only drives those two runners.`,
-        );
-    }
-    const bin = resolveBin(cwd, resolved);
-    if (!bin)
-      return text(
-        `${resolved} is not installed in ${cwd} (no node_modules/.bin/${resolved}). Install deps first.`,
-      );
-    const existing = sessions.get(cwd); // restart only this cwd's watcher
-    if (existing) {
-      existing.proc.kill();
-    } else {
-      // No local session, but another server process might already watch this dir.
-      const owner = watchedElsewhere(cwd);
-      if (owner)
-        return text(
-          `${cwd} is already watched by another test-warden (pid ${owner}). ` +
-            `Not starting a second watcher — a duplicate file-watch on the same ` +
-            `tree can grind the machine to a halt. Reuse that instance, or stop it first.`,
-        );
-    }
-    try {
-      await startSession({ runner: resolved, bin, cwd, args, env });
-    } catch (e) {
-      return text(e.message); // e.g. node-pty not compiled — actionable, not a hang
-    }
+    const { session, error } = await startWatchCore({ runner, cwd, args, env });
+    if (error) return text(error);
+    if (!(await awaitReady(session))) return notReadyText(session);
     return text(
-      `Started ${resolved} watch in ${cwd}. ${sessions.size} session(s) active. ` +
-        `Use get_results (pass cwd when more than one) to read each run.`,
+      `Started ${session.runner} watch in ${session.cwd}. ${sessions.size} session(s) active. ` +
+        `Editing code auto-reruns impacted tests; call get_results to read them, or ` +
+        `run_all / run_failed / run_filtered to force a specific run.`,
     );
   },
 );
@@ -266,18 +346,32 @@ const cwdArg = {
     .describe("Which session (its start_watch cwd). Omit if only one is active."),
 };
 
+// run_* also auto-start a watch when none is running, so for them cwd doubles as the
+// directory to start in.
+const runCwdArg = {
+  cwd: z
+    .string()
+    .optional()
+    .describe(
+      "Project dir. Omit if a single watch is already running; pass it to target a specific watch, or to auto-start one if none is running.",
+    ),
+};
+
 server.registerTool(
   "run_all",
   {
     description:
-      "Trigger a full-suite rerun (the watch otherwise reruns only change-impacted tests). Returns immediately — call get_results to read the outcome.",
-    inputSchema: cwdArg,
+      "Run the whole suite once and return its pass/fail results (counts + failing tests with messages). Waits for the run to finish. Auto-starts a watch if none is running yet (pass cwd).",
+    inputSchema: runCwdArg,
   },
   async ({ cwd }) => {
-    const s = pick(cwd);
+    const { session: s, error } = await ensureSession(cwd);
+    if (error) return text(error);
+    if (!(await awaitReady(s))) return notReadyText(s);
     markTriggered(s);
     s.proc.write("a"); // "a" = run all, in the runner's watch UI
-    return text(`Triggered: run all in ${s.cwd}. Call get_results to read the outcome.`);
+    s.fullScope = true; // "a" also durably escapes the startup --changed scope
+    return resultsText(await waitForResults(s));
   },
 );
 
@@ -285,14 +379,16 @@ server.registerTool(
   "run_failed",
   {
     description:
-      "Trigger a rerun of only the tests that failed in the last run — faster than the full suite while iterating on a fix. Returns immediately — call get_results to read the outcome.",
-    inputSchema: cwdArg,
+      "Rerun only the tests that failed in the last run and return the results — faster than the full suite while iterating on a fix. Waits for the run to finish. Auto-starts a watch if none is running (pass cwd).",
+    inputSchema: runCwdArg,
   },
   async ({ cwd }) => {
-    const s = pick(cwd);
+    const { session: s, error } = await ensureSession(cwd);
+    if (error) return text(error);
+    if (!(await awaitReady(s))) return notReadyText(s);
     markTriggered(s);
     s.proc.write("f"); // "f" = run only failed, in the runner's watch UI
-    return text(`Triggered: run failed in ${s.cwd}. Call get_results to read the outcome.`);
+    return resultsText(await waitForResults(s));
   },
 );
 
@@ -300,22 +396,43 @@ server.registerTool(
   "run_filtered",
   {
     description:
-      "Trigger a rerun of only the tests matching a pattern (by file path or test name) — use to focus on one area. Returns immediately — call get_results to read the outcome.",
+      "Run only the tests matching a pattern (by file path or test name) and return the results — use to focus on one area. Waits for the run to finish. Auto-starts a watch if none is running (pass cwd).",
     inputSchema: {
       pattern: z.string().describe("Regex/substring to filter by."),
       by: z
         .enum(["path", "name"])
         .default("path")
         .describe("Match the pattern against the test file path (default) or the test name."),
-      ...cwdArg,
+      ...runCwdArg,
     },
   },
   async ({ pattern, by, cwd }) => {
-    const s = pick(cwd);
+    const { session: s, error } = await ensureSession(cwd);
+    if (error) return text(error);
+    if (!(await awaitReady(s))) return notReadyText(s);
+    // The watch starts scoped to changed files, and the interactive filter only
+    // searches within that scope — so a filter for an untouched file finds nothing.
+    // Escape once per session: run the full suite ("a") and let it land — filtering
+    // mid-run cancels it before the scope widens — then filters see all files.
+    // ponytail: costs one full-suite run on a session's first run_filtered; piloting
+    // the watcher offers no cheaper reliable escape.
+    if (!s.fullScope) {
+      markTriggered(s);
+      s.proc.write("a");
+      await waitForResults(s);
+      s.fullScope = true;
+    }
     markTriggered(s);
+    // Type the filter like a human: one keystroke per write, with a breath between.
+    // A coalesced chunk ("todo\r") reaches jest's prompt as ONE key — the pattern
+    // shows but the trailing Enter never registers, wedging the watcher in pattern
+    // mode and eating every later keystroke.
     s.proc.write(by === "name" ? "t" : "p"); // "t" = filter by test name, "p" = by path
-    s.proc.write(pattern + CR);
-    return text(`Triggered: filter by ${by} /${pattern}/ in ${s.cwd}. Call get_results to read the outcome.`);
+    for (const ch of pattern + CR) {
+      await sleep(25);
+      s.proc.write(ch);
+    }
+    return resultsText(await waitForResults(s));
   },
 );
 
@@ -323,28 +440,12 @@ server.registerTool(
   "get_results",
   {
     description:
-      "Read the latest run's results: pass/fail counts and failing tests with messages. Waits for an in-progress run to finish, so call it right after editing code (the watch auto-runs impacted tests) or after a run_* trigger. Requires start_watch first.",
+      "Read the latest run's results (pass/fail counts and failing tests with messages) without triggering a new run — use after editing code, since the watch auto-reruns impacted tests. Waits for an in-progress run to finish. Requires start_watch first (or use a run_* tool, which auto-starts).",
     inputSchema: cwdArg,
   },
   async ({ cwd }) => {
     const s = pick(cwd);
-    // Block until the in-flight run lands instead of returning pending and making
-    // the agent poll. Trust the JSON only once its mtime advanced past the trigger
-    // (a fresh run) and it parses (not mid-write).
-    // ponytail: 30s ceiling so we return before a typical MCP client request
-    // timeout; bump it or make it an arg if a suite legitimately runs longer.
-    const deadline = Date.now() + 30_000;
-    let res = null;
-    while (Date.now() < deadline) {
-      if (resultsMtime(s) > s.triggeredMtime && (res = readResults(s))) break;
-      await sleep(100);
-    }
-    if (!res)
-      return text(
-        JSON.stringify({ pending: true }, null, 2) +
-          "\n// Still running after 30s — retry, or check tail_log.",
-      );
-    return text(JSON.stringify(res, null, 2));
+    return resultsText(await waitForResults(s));
   },
 );
 
