@@ -111,17 +111,45 @@ function markTriggered(s) {
   s.lastActivity = Date.now();
 }
 
+// Stop a watcher the way a human would — press "q" — so the runner exits gracefully
+// and runs its teardown (globalSetup teardown, e.g. stopping the postgres a suite
+// spawned). A hard kill skips teardown and leaks those resources: the port stays
+// held and the next watch fails to boot. kill() only if the runner ignores "q" for
+// the grace period (wedged, or never got ready). Resolves once the process is gone;
+// idempotent, so overlapping stop paths (idle sweep + stop_watch) can't double-fire.
+// ponytail: env knob instead of config plumbing — TEST_WARDEN_QUIT_GRACE_MS overrides.
+const QUIT_GRACE_MS = Number(process.env.TEST_WARDEN_QUIT_GRACE_MS) || 10_000;
+function stopSession(s) {
+  if (!s.stopping) {
+    const exited = new Promise((r) => s.proc.onExit(r));
+    s.stopping = (async () => {
+      try {
+        s.proc.write("q");
+      } catch {
+        /* pty already gone */
+      }
+      const graceful = await Promise.race([
+        exited.then(() => true),
+        sleep(QUIT_GRACE_MS).then(() => false),
+      ]);
+      if (!graceful) s.proc.kill();
+      await exited;
+    })();
+  }
+  return s.stopping;
+}
+
 // Idle timeout: a warm watcher holds real RAM, and an abandoned session shouldn't
 // keep paying it. Activity = an MCP-triggered run or any completed auto-run (the
-// results file advancing). Idle watchers are killed; the next run_* transparently
+// results file advancing). Idle watchers are stopped; the next run_* transparently
 // restarts them with the same params (cold-start cost, paid once).
 // ponytail: env knob instead of config plumbing — TEST_WARDEN_IDLE_MS overrides.
 const IDLE_MS = Number(process.env.TEST_WARDEN_IDLE_MS) || 30 * 60_000;
-const lastStart = new Map(); // canonical cwd -> { runner, args, env } for restarts
+const lastStart = new Map(); // canonical cwd -> { args, env } for restarts
 setInterval(() => {
   const now = Date.now();
   for (const s of sessions.values())
-    if (now - Math.max(s.lastActivity, resultsMtime(s)) > IDLE_MS) s.proc.kill();
+    if (now - Math.max(s.lastActivity, resultsMtime(s)) > IDLE_MS) stopSession(s);
 }, Math.min(IDLE_MS, 60_000)).unref();
 
 // Cross-process guard: is a *different*, still-alive test-warden already watching this
@@ -264,7 +292,9 @@ async function startWatchCore(params) {
     };
   const existing = sessions.get(cwd); // restart only this cwd's watcher
   if (existing) {
-    existing.proc.kill();
+    // Await the graceful quit: the old runner's teardown must release its resources
+    // (test DB ports, etc.) BEFORE the new runner's setup tries to claim them.
+    await stopSession(existing);
   } else {
     // Another live server already watches this dir — typically a forgotten session's.
     // Newest wins: two sessions can't run this project's tests concurrently anyway
@@ -281,7 +311,8 @@ async function startWatchCore(params) {
       } catch {
         /* already gone */
       }
-      const deadline = Date.now() + 5_000;
+      // The evicted server quits its watchers gracefully first — allow it that grace.
+      const deadline = Date.now() + QUIT_GRACE_MS + 5_000;
       while (watchedElsewhere(cwd) && Date.now() < deadline) await sleep(50);
       if (watchedElsewhere(cwd))
         return {
@@ -534,11 +565,11 @@ server.registerTool(
     // pick() realpaths cwd so a symlink/trailing-slash spelling still finds the session.
     const targets = cwd ? [pick(cwd)] : [...sessions.values()];
     if (!targets.length) return text("No session running.");
+    await Promise.all(targets.map(stopSession)); // graceful — teardowns run
     for (const s of targets) {
-      s.proc.kill();
+      // onExit's cleanup normally handles both, but belt-and-braces for a watcher
+      // that had to be hard-killed mid-boot.
       sessions.delete(s.cwd);
-      // onExit's cleanup is guarded by `sessions.get(cwd) === s`, which the delete
-      // above just broke — reap the live marker here or it outlives the session.
       fs.rmSync(s.liveFile, { force: true });
     }
     return text(`Stopped: ${targets.map((s) => s.cwd).join(", ")}.`);
@@ -549,7 +580,16 @@ server.registerTool(
 // finished session leaves a zombie server whose watchers keep rerunning tests on every
 // edit (colliding with the next session's runs — e.g. on a shared test database) and
 // whose .live markers lock the projects against the next session's server.
-function shutdown() {
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return; // SIGTERM + stdin-end can both fire; quit once
+  shuttingDown = true;
+  // Graceful quit so suite teardowns run (test DBs release their ports); the outer
+  // race caps the wait so an unkillable child can't keep a zombie server alive.
+  await Promise.race([
+    Promise.all([...sessions.values()].map(stopSession)),
+    sleep(QUIT_GRACE_MS + 2_000),
+  ]);
   for (const s of sessions.values()) {
     s.proc.kill();
     fs.rmSync(s.liveFile, { force: true });

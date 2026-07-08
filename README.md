@@ -89,6 +89,8 @@ Unknown keys are rejected (validation catches typos). To (re)generate the file f
 
 **Env vars:** tests often rely on env set outside jest/vitest config (e.g. `"test": "TZ=UTC jest"` for stable dates, or a `.env` loaded by dotenv-cli). The server launches the runner binary directly, so those vars must be listed in the config entry's `env` — `bootstrap` pre-fills the inline ones (including a `cross-env` prefix) from the `test` script; add file-loaded ones by hand. Env set inside jest/vitest *config* already works. For one-off overrides, pass `env` to `start_watch`.
 
+**Suite setup/teardown:** watchers are stopped gracefully — the server presses `q` in the watch UI and waits for the runner to exit — so `globalSetup` teardowns run to completion (a postgres started by your vitest setup gets stopped and releases its port before anything else starts). A hard kill only happens if the runner ignores `q` for 10s (`TEST_WARDEN_QUIT_GRACE_MS` overrides). This applies to `stop_watch`, restarts, the 30-minute idle stop, and session shutdown alike.
+
 **Monorepos:** one warm session per `cwd`, so you can watch several at once (e.g. `mobile` on jest and `api` on vitest concurrently). Add one `test-warden.config.js` entry per package (`dir: "packages/app"`, …). The `cwd` arg on the other tools picks which session — omit it when only one is running. The failure hook reports each workspace independently, so a green run in one never hides a red run in another.
 
 ## Failure notifications (optional)
