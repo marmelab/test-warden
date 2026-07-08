@@ -183,10 +183,12 @@ export function buildCommand(runner, bin, resultsFile, reporterPath, extra) {
 }
 
 // Normalize a parsed results blob into the compact summary the server returns.
-// Two near-identical shapes show up: jest's reporter-API AggregatedResult uses
-// `testFilePath` + a nested `testResults` array per suite; vitest's json reporter
-// (and jest's `--json` CLI) use `name` + `assertionResults`. Accept either.
+// Three shapes show up: jest's reporter-API AggregatedResult uses `testFilePath` +
+// a nested `testResults` array per suite; vitest's json reporter (and jest's
+// `--json` CLI) use `name` + `assertionResults`; playwright's json reporter uses
+// `stats` + recursive `suites` → `specs` → `tests` → `results`. Accept any.
 export function normalizeResults(r) {
+  if (r.stats || r.suites) return normalizePlaywright(r);
   const failures = [];
   for (const suite of r.testResults ?? []) {
     const assertions = suite.assertionResults ?? suite.testResults ?? [];
@@ -207,6 +209,42 @@ export function normalizeResults(r) {
     failed: r.numFailedTests ?? 0,
     suitesFailed: r.numFailedTestSuites ?? 0,
     ok: (r.numFailedTests ?? 0) === 0 && (r.numFailedTestSuites ?? 0) === 0,
+    failures,
+  };
+}
+
+function normalizePlaywright(r) {
+  const s = r.stats ?? {};
+  const root = r.config?.rootDir;
+  const failures = [];
+  // Suites nest per describe block; a suite's own title repeats its file name at
+  // the top level, so only include titles that differ from the file in the chain.
+  const walk = (suite, chain) => {
+    const named =
+      suite.title && suite.title !== suite.file ? [...chain, suite.title] : chain;
+    for (const sub of suite.suites ?? []) walk(sub, named);
+    for (const spec of suite.specs ?? []) {
+      if (spec.ok) continue;
+      const results = (spec.tests ?? []).flatMap((t) => t.results ?? []);
+      const error = results.findLast((res) => res.error)?.error;
+      const file = spec.file ?? suite.file ?? "";
+      failures.push({
+        test: [...named, spec.title].join(" > "),
+        file: root && file ? path.resolve(root, file) : file,
+        message: (error?.message ?? "").slice(0, 2000),
+      });
+    }
+  };
+  for (const suite of r.suites ?? []) walk(suite, []);
+  const failed = s.unexpected ?? 0;
+  const suitesFailed = (r.errors ?? []).length; // config/loader-level errors
+  return {
+    // `flaky` passed on retry and `skipped` didn't run — count both in total only.
+    total: (s.expected ?? 0) + failed + (s.skipped ?? 0) + (s.flaky ?? 0),
+    passed: (s.expected ?? 0) + (s.flaky ?? 0),
+    failed,
+    suitesFailed,
+    ok: failed === 0 && suitesFailed === 0,
     failures,
   };
 }

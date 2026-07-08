@@ -278,6 +278,65 @@ test("normalizeResults: all-green run is ok with no failures", () => {
   assert.deepEqual(r.failures, []);
 });
 
+// Playwright's json reporter: stats + suites→specs→tests→results, captured from a
+// real 1.61 run (one failing spec among three). See demo/playwright.
+test("normalizeResults: playwright json shape (real fixture)", () => {
+  const fixture = JSON.parse(
+    fs.readFileSync(new URL("./playwright-results.fixture.json", import.meta.url), "utf8"),
+  );
+  const r = normalizeResults(fixture);
+  assert.equal(r.total, 3);
+  assert.equal(r.passed, 2);
+  assert.equal(r.failed, 1);
+  assert.equal(r.suitesFailed, 0);
+  assert.equal(r.ok, false);
+  assert.equal(r.failures.length, 1);
+  assert.equal(r.failures[0].test, "intentionally fails");
+  assert.match(r.failures[0].file, /tmp-fail\.spec\.js$/);
+  assert.match(r.failures[0].message, /toHaveText/);
+});
+
+test("normalizeResults: playwright nested describe blocks and green runs", () => {
+  const green = normalizeResults({
+    stats: { expected: 2, unexpected: 0, skipped: 0, flaky: 0 },
+    suites: [],
+    errors: [],
+  });
+  assert.equal(green.ok, true);
+  assert.deepEqual(green.failures, []);
+  const nested = normalizeResults({
+    stats: { expected: 0, unexpected: 1, skipped: 0, flaky: 0 },
+    errors: [{ message: "config error" }],
+    suites: [
+      {
+        title: "a.spec.js",
+        file: "a.spec.js",
+        suites: [
+          {
+            title: "checkout",
+            file: "a.spec.js",
+            specs: [
+              {
+                title: "pays",
+                ok: false,
+                tests: [
+                  { results: [{ status: "failed", error: { message: "boom" } }] },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(nested.failed, 1);
+  assert.equal(nested.suitesFailed, 1); // top-level errors count as suite failures
+  assert.equal(nested.ok, false);
+  assert.deepEqual(nested.failures, [
+    { test: "checkout > pays", file: "a.spec.js", message: "boom" },
+  ]);
+});
+
 test("normalizeResults: missing fields default to zero, not crash", () => {
   const r = normalizeResults({});
   assert.deepEqual(r, {
