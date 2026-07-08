@@ -30,6 +30,15 @@ test("init merges, preserves existing keys, and is idempotent", () => {
     "added the Edit|Write nudge hook",
   );
 
+  // Hook files copied into the project, with the core.js import rewritten.
+  const hookDir = path.join(dir, ".claude/hooks/test-warden");
+  for (const f of ["notify-on-fail.mjs", "nudge-watch.mjs", "emit.mjs", "core.js"]) {
+    assert.ok(fs.existsSync(path.join(hookDir, f)), `copied ${f}`);
+  }
+  const nudge = fs.readFileSync(path.join(hookDir, "nudge-watch.mjs"), "utf8");
+  assert.ok(nudge.includes('"./core.js"'), "rewrote core.js import");
+  assert.ok(!nudge.includes("../src/core.js"), "no package-relative import left");
+
   // Second run adds nothing.
   run(dir);
   assert.equal(read(dir, ".claude/settings.json").hooks.PostToolUse.length, 3);

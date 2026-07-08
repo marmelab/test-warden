@@ -75,7 +75,7 @@ Add to your project's `.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "node node_modules/test-warden/hooks/notify-on-fail.mjs"
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/test-warden/notify-on-fail.mjs\""
           }
         ]
       }
@@ -84,7 +84,7 @@ Add to your project's `.claude/settings.json`:
 }
 ```
 
-Fires once per failing run (deduped by results-file mtime); silent while green. `npx test-warden init` adds this for you.
+Fires once per failing run (deduped by results-file mtime); silent while green. `npx test-warden init` adds this for you — it copies the hook files into `.claude/hooks/test-warden/` so the commands are stable and committable (no dependence on `node_modules` layout or the npx cache). Installed as a dependency, `node node_modules/test-warden/hooks/notify-on-fail.mjs` works too.
 
 ## Auto-start on edit (optional)
 
@@ -94,7 +94,7 @@ A second bundled hook, `nudge-watch.mjs` (matcher `Edit|Write`, also Claude Code
 {
   "matcher": "Edit|Write",
   "hooks": [
-    { "type": "command", "command": "node node_modules/test-warden/hooks/nudge-watch.mjs" }
+    { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/test-warden/nudge-watch.mjs\"" }
   ]
 }
 ```
