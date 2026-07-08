@@ -22,7 +22,11 @@ function resultFiles() {
     const match = /^test-warden-\d+-([0-9a-f]+)\.json$/.exec(f);
     if (!match) continue;
     const p = path.join(DIR, f);
-    out.push({ p, m: fs.statSync(p).mtimeMs, slug: match[1] });
+    try {
+      out.push({ p, m: fs.statSync(p).mtimeMs, slug: match[1] });
+    } catch {
+      /* deleted between readdir and stat (concurrent hook reaping) — skip */
+    }
   }
   return out;
 }
