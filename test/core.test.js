@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   buildCommand,
   detectRunner,
+  loadConfig,
   resolveBin,
   parseScriptEnv,
   normalizeResults,
@@ -89,6 +90,69 @@ test("detectRunner: from deps, config files, neither, and ambiguous", () => {
   assert.equal(detectRunner(mk(() => {})), null); // no package.json at all
   // both → throws so the caller asks for an explicit runner
   assert.throws(() => detectRunner(mk((d) => pkg(d, { devDependencies: { jest: "^29", vitest: "^1" } }))), /both/i);
+});
+
+test("loadConfig: missing config file is an error (no detection fallback)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twm-cfg-"));
+  await assert.rejects(() => loadConfig(dir), /not found.*test-warden init/s);
+});
+
+test("loadConfig: schema violations are rejected with the offending path", async () => {
+  const mk = (source) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "twm-cfg-"));
+    fs.writeFileSync(path.join(dir, "test-warden.config.js"), source);
+    return dir;
+  };
+  // wrong runner
+  await assert.rejects(
+    () => loadConfig(mk('module.exports = [{ runner: "mocha" }];')),
+    /entries\[0\]\.runner/,
+  );
+  // unknown key (typo)
+  await assert.rejects(
+    () => loadConfig(mk('module.exports = [{ runner: "jest", argz: "-w" }];')),
+    /entries\[0\]/,
+  );
+  // empty config — server would have nothing to run
+  await assert.rejects(
+    () => loadConfig(mk("module.exports = [];")),
+    /at least one entry/,
+  );
+  // all failures point at the regeneration escape hatch
+  await assert.rejects(
+    () => loadConfig(mk("module.exports = [];")),
+    /test-warden bootstrap/,
+  );
+});
+
+test("loadConfig: CJS module.exports, dir/bin resolved to absolute", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "twm-cfg-")));
+  fs.mkdirSync(path.join(root, "packages", "app"), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "test-warden.config.js"),
+    'module.exports = [{ dir: "packages/app", runner: "jest", args: "--ci", env: { TZ: "UTC" }, bin: "tools/jest" }];',
+  );
+  const [e] = await loadConfig(root);
+  assert.equal(e.dir, path.join(root, "packages", "app")); // absolute + realpath'd
+  assert.equal(e.bin, path.join(root, "tools", "jest"));
+  assert.equal(e.runner, "jest");
+  assert.equal(e.args, "--ci");
+  assert.deepEqual(e.env, { TZ: "UTC" });
+});
+
+test("loadConfig: ESM export default under type:module; dir defaults to .", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "twm-cfg-")));
+  fs.writeFileSync(path.join(root, "package.json"), '{"type":"module"}');
+  fs.writeFileSync(
+    path.join(root, "test-warden.config.js"),
+    'export default [{ runner: "vitest" }];',
+  );
+  const [e] = await loadConfig(root);
+  assert.equal(e.runner, "vitest");
+  assert.equal(e.dir, root);
+  assert.equal(e.bin, undefined); // no bin key invented
+  assert.equal(e.args, ""); // schema defaults filled in
+  assert.deepEqual(e.env, {});
 });
 
 test("resolveBin: walks up to a hoisted node_modules/.bin", () => {

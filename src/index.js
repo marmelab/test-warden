@@ -12,18 +12,18 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   buildCommand,
-  detectRunner,
+  loadConfig,
   resolveBin,
-  scriptEnv,
   normalizeResults,
   slugFor,
   watcherAlive,
 } from "./core.js";
 
-// `test-warden init` wires the server + hook into the current project, then exits.
-if (process.argv[2] === "init") {
-  const { run } = await import("./init.js");
-  run();
+// `test-warden init` wires the server + hooks into the current project;
+// `test-warden bootstrap` (re)generates test-warden.config.js (overwrites, warns).
+if (process.argv[2] === "init" || process.argv[2] === "bootstrap") {
+  const mod = await import("./init.js");
+  (process.argv[2] === "init" ? mod.run : mod.bootstrap)();
   process.exit(0);
 }
 
@@ -47,6 +47,19 @@ async function getPty() {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JEST_REPORTER = path.join(HERE, "jest-reporter.cjs");
+
+// Materialized test setup, written by `test-warden init` in the project root (which
+// is where MCP clients spawn this server) and validated here. It is the ONLY source
+// of truth — no live detection — so a missing or invalid config is fatal: better a
+// clear startup failure (the message lands in the client's MCP logs) than tools that
+// guess wrong about how to run the project's tests.
+let CONFIG;
+try {
+  CONFIG = await loadConfig(process.cwd());
+} catch (e) {
+  console.error(`test-warden: ${e.message}`);
+  process.exit(1);
+}
 
 // --- watch sessions, keyed by project dir ----------------------------------
 const sessions = new Map(); // cwd -> { proc, runner, cwd, resultsFile, log, triggeredMtime }
@@ -147,11 +160,11 @@ async function startSession({ runner, bin, cwd, args, env }) {
     cols: 120,
     rows: 40,
     cwd,
-    // Layer env: base process → what the project's test script sets (e.g. TZ=UTC)
-    // → caller override → our required vars (which must win, esp. CI="" for watch).
+    // Layer env: base process → caller env (startWatchCore already folded in the
+    // config entry's env, or the test script's inline vars as fallback) → our
+    // required vars (which must win, esp. CI="" for watch).
     env: {
       ...process.env,
-      ...scriptEnv(cwd),
       ...env,
       TEST_WATCH_MCP_OUT: resultsFile,
       CI: "",
@@ -177,7 +190,6 @@ async function startSession({ runner, bin, cwd, args, env }) {
     }
   });
   fs.writeFileSync(liveFile, `${process.pid}\n${cwd}`); // see watcherAlive for the format
-  lastStart.set(cwd, { runner, args, env }); // so an idle-killed watcher restarts faithfully
   const s = {
     proc,
     runner,
@@ -221,30 +233,34 @@ function readResults(s) {
 // a ready-to-show message — on any failure: bad dir, no/ambiguous runner, not
 // installed, already watched by another process, or native addon missing. Shared by
 // start_watch and the run_* tools' auto-start.
-async function startWatchCore({ runner, cwd, args, env }) {
+async function startWatchCore(params) {
+  let { cwd, args, env } = params;
   // Canonicalize first: the same dir spelled two ways (symlink, trailing slash, `..`)
   // must be one session/one watcher, not two.
   try {
     cwd = fs.realpathSync(cwd);
   } catch {
-    /* missing dir — detectRunner/resolveBin below give the clear error */
+    /* missing dir — the entry lookup below gives the clear error */
   }
-  let resolved = runner;
-  if (!resolved) {
-    try {
-      resolved = detectRunner(cwd);
-    } catch (e) {
-      return { error: e.message }; // both detected — ask the agent to specify
-    }
-    if (!resolved)
-      return {
-        error: `No jest or vitest found in ${cwd}. This server only drives those two runners.`,
-      };
-  }
-  const bin = resolveBin(cwd, resolved);
+  // The test-warden.config.js entry for this dir is the source of truth — there is
+  // no detection fallback. Per-call args/env still extend it.
+  const cfg = CONFIG.find((e) => e.dir === cwd);
+  if (!cfg)
+    return {
+      error:
+        `No test-warden.config.js entry for ${cwd}. Configured dirs: ` +
+        `${CONFIG.map((e) => e.dir).join(", ")}. Add an entry (and restart the server) to run tests there.`,
+    };
+  args = [cfg.args, args].filter(Boolean).join(" ") || undefined;
+  env = { ...cfg.env, ...env };
+  const bin = cfg.bin ?? resolveBin(cwd, cfg.runner);
   if (!bin)
     return {
-      error: `${resolved} is not installed in ${cwd} (no node_modules/.bin/${resolved}). Install deps first.`,
+      error: `${cfg.runner} is not installed in ${cwd} (no node_modules/.bin/${cfg.runner}). Install deps first, or set \`bin\` in test-warden.config.js.`,
+    };
+  if (cfg.bin && !fs.existsSync(bin))
+    return {
+      error: `The bin configured in test-warden.config.js does not exist: ${bin}.`,
     };
   const existing = sessions.get(cwd); // restart only this cwd's watcher
   if (existing) {
@@ -274,7 +290,12 @@ async function startWatchCore({ runner, cwd, args, env }) {
     }
   }
   try {
-    return { session: await startSession({ runner: resolved, bin, cwd, args, env }) };
+    const session = await startSession({ runner: cfg.runner, bin, cwd, args, env });
+    // Store the RAW caller params, not the config-merged ones: an idle-kill restart
+    // re-enters this function, which re-applies the config — merged values would
+    // apply it twice (cfg.args appended two times).
+    lastStart.set(cwd, { args: params.args, env: params.env });
+    return { session };
   } catch (e) {
     return { error: e.message }; // e.g. node-pty not compiled — actionable, not a hang
   }
@@ -347,31 +368,29 @@ server.registerTool(
   "start_watch",
   {
     description:
-      "Start a jest/vitest watch in the given project. Once started, the watch runs continuously and automatically reruns every test impacted by any unstaged change. After 30 min without a run it stops itself; any run_* call restarts it transparently. The runner is auto-detected from cwd's package.json — only pass it to override.",
+      "Start a jest/vitest watch in the given project. Once started, the watch runs continuously and automatically reruns every test impacted by any unstaged change. After 30 min without a run it stops itself; any run_* call restarts it transparently. The setup (runner, env, flags) comes from the project's test-warden.config.js — cwd must match one of its entries.",
     inputSchema: {
       cwd: z
         .string()
-        .describe("Absolute path to the project/workspace to run tests in."),
-      runner: z
-        .enum(["jest", "vitest"])
-        .optional()
-        .describe("Override auto-detection (e.g. when a package has both)."),
+        .describe(
+          "Absolute path to the project/workspace to run tests in. Must match a `dir` entry in test-warden.config.js.",
+        ),
       args: z
         .string()
         .optional()
         .describe(
-          "Extra CLI args appended to the runner (e.g. a path filter).",
+          "Extra CLI args appended to the runner, on top of the config entry's `args` (e.g. a path filter).",
         ),
       env: z
         .record(z.string())
         .optional()
         .describe(
-          "Extra env vars for the runner. Inline assignments in the project's `test` script (e.g. TZ=UTC) are applied automatically; use this for file-loaded vars (dotenv) or overrides.",
+          "Extra env vars for the runner, overriding the config entry's `env` per-call.",
         ),
     },
   },
-  async ({ runner, cwd, args, env }) => {
-    const { session, error } = await startWatchCore({ runner, cwd, args, env });
+  async ({ cwd, args, env }) => {
+    const { session, error } = await startWatchCore({ cwd, args, env });
     if (error) return text(error);
     if (!(await awaitReady(session))) return notReadyText(session);
     return text(

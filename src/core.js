@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { pathToFileURL } from "node:url";
 
 // Stable per-project key. realpath collapses symlinks, `..`, and trailing slashes,
 // so the same directory spelled two ways yields ONE slug — one watcher, one results
@@ -106,6 +107,71 @@ export function scriptEnv(cwd) {
     /* no/unreadable package.json */
   }
   return parseScriptEnv(pkg.scripts?.test);
+}
+
+// Schema check via zod. zod ships with the server, but this file is also copied next
+// to the project's hooks, where zod may not resolve — validation is then skipped (the
+// server validated the same file at startup, so the hook still reads sane entries).
+async function validateConfig(entries, file) {
+  let z;
+  try {
+    ({ z } = await import("zod"));
+  } catch {
+    return entries;
+  }
+  const Entry = z
+    .object({
+      dir: z.string().default("."),
+      runner: z.enum(["jest", "vitest"]),
+      args: z.string().default(""),
+      env: z.record(z.string()).default({}),
+      bin: z.string().optional(),
+    })
+    .strict(); // unknown keys are almost always typos — fail loudly
+  const res = z
+    .array(Entry)
+    .min(1, "at least one entry is required")
+    .safeParse(entries);
+  if (!res.success) {
+    const why = res.error.issues
+      .map((i) => {
+        const where = i.path.length
+          ? `entries[${i.path[0]}]` + i.path.slice(1).map((p) => `.${p}`).join("")
+          : "entries";
+        return `${where}: ${i.message}`;
+      })
+      .join("; ");
+    throw new Error(
+      `Invalid ${file} — ${why}. Fix it by hand or regenerate with \`npx test-warden bootstrap\` (overwrites).`,
+    );
+  }
+  return res.data;
+}
+
+// Load and validate test-warden.config.js from `root` — the REQUIRED description of
+// how to run this project's tests (bootstrapped by `test-warden init`, then
+// hand-maintained). Throws an actionable error if the file is missing, doesn't parse,
+// or fails the schema. Each entry describes one package with tests:
+// { dir, runner, args, env, bin? }. `dir` and `bin` are relative to the config file;
+// they come back absolute (dir realpath'd, to match the server's canonical session
+// keys). import() handles both module.exports and export default.
+export async function loadConfig(root) {
+  const file = path.join(root, "test-warden.config.js");
+  if (!fs.existsSync(file))
+    throw new Error(
+      `${file} not found. Run \`npx test-warden init\` to bootstrap it, then edit it to describe your test setup.`,
+    );
+  const mod = await import(pathToFileURL(file).href);
+  const entries = await validateConfig([].concat(mod.default ?? []), file);
+  return entries.map((e) => {
+    let dir = path.resolve(root, e.dir);
+    try {
+      dir = fs.realpathSync(dir);
+    } catch {
+      /* missing dir — the server reports it when targeted */
+    }
+    return { ...e, dir, ...(e.bin && { bin: path.resolve(root, e.bin) }) };
+  });
 }
 
 export function buildCommand(runner, bin, resultsFile, reporterPath, extra) {
