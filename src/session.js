@@ -182,6 +182,7 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
     triggeredMtime: 0,
     lastActivity: Date.now(),
     idleAt: 0,
+    idleResultsMtime: 0, // results mtime as of the last idle prompt = last completed run
     lastOutputAt: 0,
   };
   const READY = /Waiting for file changes|Watch Usage/; // vitest | jest idle prompt
@@ -196,6 +197,10 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
       // the NEXT run's output re-opens the busy state (a lingering prompt would read
       // as still-idle through the following run).
       session.idleAt = Date.now();
+      // The just-finished run's JSON is already on disk (reporters write before the
+      // idle prompt prints), so this snapshots the last completed run's mtime — the
+      // floor get_results uses when it later catches a fresh run mid-flight.
+      session.idleResultsMtime = resultsMtime(session);
       tail = "";
       if (readyResolve) {
         readyResolve(true);

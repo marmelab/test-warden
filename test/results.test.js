@@ -90,6 +90,34 @@ test("waitForResults: never returns the previous run's stale JSON — only a fre
   assert.equal(res.ok, true);
 });
 
+test("get_results contract: run already wrote before its idle prompt — return it, don't pend", async () => {
+  const s = fakeSession();
+  // The in-flight run has ALREADY written its JSON, but the idle prompt hasn't printed
+  // yet, so isRunning is still true. Flooring at the CURRENT mtime would wait for a
+  // write that never comes (30s pending); flooring at the last-idle mtime returns the
+  // run that just landed. This is the window a plain markTriggered(s) got wrong.
+  fs.writeFileSync(
+    s.resultsFile,
+    JSON.stringify({
+      numTotalTests: 5,
+      numPassedTests: 5,
+      numFailedTests: 0,
+      numFailedTestSuites: 0,
+      testResults: [],
+    }),
+  );
+  const currentMtime = resultsMtime(s);
+  s.idleResultsMtime = currentMtime - 1; // the last idle saw an older run
+  s.idleAt = 1000;
+  s.lastOutputAt = 2000; // mid-run: output since the last idle
+  assert.equal(isRunning(s), true);
+
+  markTriggered(s, s.idleResultsMtime); // get_results' rule when running
+  const res = await waitForResults(s, 250); // short: must return now, not ride the deadline
+  assert.equal(res.total, 5);
+  assert.equal(res.ok, true);
+});
+
 test("waitForResults: returns null when no fresh run lands within the timeout", async () => {
   const s = fakeSession();
   // File present but stale vs the trigger — nothing newer will land, so the poll loop

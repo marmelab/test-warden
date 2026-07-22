@@ -19,10 +19,13 @@ export function resultsMtime(s) {
   }
 }
 
-// Record the file's mtime at the instant a run is triggered, so get_results can
-// tell the freshly-finished run apart from the previous run's leftover JSON.
-export function markTriggered(s) {
-  s.triggeredMtime = resultsMtime(s);
+// Record the trigger floor: waitForResults only trusts JSON whose mtime beats it.
+// Defaults to the file's current mtime (right for a run WE trigger — the previous
+// run's JSON is what's on disk). Callers reacting to a run already in flight must
+// pass the last-idle mtime instead: that run may have ALREADY written, so flooring
+// at the current mtime would wait for a write that never comes (see get_results).
+export function markTriggered(s, mtime = resultsMtime(s)) {
+  s.triggeredMtime = mtime;
   s.lastActivity = Date.now();
 }
 

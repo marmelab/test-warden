@@ -178,10 +178,13 @@ export function registerTools(server) {
     async ({ cwd }) => {
       const s = requireSession(cwd);
       // If the watcher is mid-run — typically an edit its own fs-watch just picked up —
-      // snapshot now so waitForResults holds out for that run's fresh write instead of
-      // returning the previous, pre-edit results (whose mtime already beats the last
-      // trigger). Idle ⇒ no snapshot, so the latest results come straight back.
-      if (isRunning(s)) markTriggered(s);
+      // floor at the last-idle mtime so waitForResults holds out for that run's fresh
+      // write instead of returning the previous, pre-edit results. NOT the current
+      // mtime: the in-flight run may have already written (JSON lands before its idle
+      // prompt), and flooring there would wait for a write that never comes — wedging
+      // get_results in "pending". Idle ⇒ no floor bump, so the latest results come
+      // straight back.
+      if (isRunning(s)) markTriggered(s, s.idleResultsMtime);
       return resultsText(await waitForResults(s));
     },
   );
