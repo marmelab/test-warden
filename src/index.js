@@ -63,6 +63,7 @@ async function shutdown() {
   for (const s of sessions.values()) {
     s.proc.kill();
     fs.rmSync(s.liveFile, { force: true });
+    fs.rmSync(s.resultsFile, { force: true });
   }
   process.exit(0);
 }

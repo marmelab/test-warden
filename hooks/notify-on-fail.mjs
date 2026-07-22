@@ -15,11 +15,11 @@ import { emitContext } from "./emit.mjs";
 const DIR = process.env.TEST_WATCH_MCP_TMP || os.tmpdir();
 const STATE = path.join(DIR, "test-warden-notify-state");
 
-// All test-warden-<pid>-<slug>.json result files in DIR, tagged with their slug.
+// All test-warden-<slug>.json result files in DIR, tagged with their slug.
 function resultFiles() {
   const out = [];
   for (const f of fs.readdirSync(DIR)) {
-    const match = /^test-warden-\d+-([0-9a-f]+)\.json$/.exec(f);
+    const match = /^test-warden-([0-9a-f]+)\.json$/.exec(f);
     if (!match) continue;
     const p = path.join(DIR, f);
     try {

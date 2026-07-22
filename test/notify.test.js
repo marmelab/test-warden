@@ -14,7 +14,7 @@ const HOOK = path.join(
 );
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "twm-notify-test-"));
 const SLUG = "abcd1234";
-const resultsFile = path.join(TMP, `test-warden-99999-${SLUG}.json`);
+const resultsFile = path.join(TMP, `test-warden-${SLUG}.json`);
 const liveMarker = path.join(TMP, `test-warden-${SLUG}.live`);
 
 // Run the hook with an isolated tmp dir; returns its stdout.
@@ -100,7 +100,7 @@ test("ignores and reaps failing results with no live watcher (orphaned session)"
 test("two workspaces: a passing one doesn't mask the other's failure", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-multi-"));
   const write = (slug, blob, mtime) => {
-    const f = path.join(tmp, `test-warden-123-${slug}.json`);
+    const f = path.join(tmp, `test-warden-${slug}.json`);
     fs.writeFileSync(f, JSON.stringify(blob));
     fs.utimesSync(f, mtime / 1000, mtime / 1000);
     fs.writeFileSync(path.join(tmp, `test-warden-${slug}.live`), `${process.pid}\n${tmp}`); // live watcher

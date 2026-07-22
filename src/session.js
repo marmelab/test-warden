@@ -115,12 +115,13 @@ export function stopSession(s) {
 // (startWatchCore) registers the returned session and wires its exit cleanup.
 async function spawnWatcher({ runner, bin, cwd, args, env }) {
   const pty = await getPty(); // native addon; throws a clear message if unbuilt
-  // Per-cwd results file so concurrent watchers don't clobber each other's JSON.
+  // One canonical results file per dir, keyed by slug (realpath hash) — NOT per-pid.
+  // Distinct worktrees are distinct paths ⇒ distinct slugs already, and newest-wins
+  // eviction guarantees a single live writer per dir, so a pid buys no separation —
+  // only files that outlive their server. Deleted on spawn and on exit; the notify
+  // hook reaps it as a backstop once no watcher is live for the slug.
   const slug = slugFor(cwd);
-  const resultsFile = path.join(
-    os.tmpdir(),
-    `test-warden-${process.pid}-${slug}.json`,
-  );
+  const resultsFile = path.join(os.tmpdir(), `test-warden-${slug}.json`);
   // Liveness marker for the nudge hook: present + pid-alive ⇒ this cwd is watched.
   // Unlike resultsFile (deleted here, reappears only after the first run), it exists
   // for the whole session, so the hook never false-nudges a freshly-started watch.
@@ -310,6 +311,7 @@ export async function startWatchCore(params) {
       if (sessions.get(cwd) === session) {
         sessions.delete(cwd);
         fs.rmSync(session.liveFile, { force: true });
+        fs.rmSync(session.resultsFile, { force: true });
       }
     });
     sessions.set(cwd, session);
