@@ -159,6 +159,7 @@ async function shutdown() {
     fs.rmSync(s.liveFile, { force: true });
     fs.rmSync(s.resultsFile, { force: true });
     fs.rmSync(s.logFile, { force: true });
+    fs.rmSync(s.runningFile, { force: true });
   }
   process.exit(0);
 }

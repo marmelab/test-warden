@@ -12,6 +12,7 @@ const HOOKS = path.join(HERE, "..", "hooks");
 const DEST = ".claude/hooks/test-warden";
 const COPIES = [
   [path.join(HOOKS, "notify-on-fail.mjs"), "notify-on-fail.mjs"],
+  [path.join(HOOKS, "block-on-fail.mjs"), "block-on-fail.mjs"],
   [path.join(HOOKS, "nudge-watch.mjs"), "nudge-watch.mjs"],
   [path.join(HOOKS, "reset-watch.mjs"), "reset-watch.mjs"],
   [path.join(HOOKS, "emit.mjs"), "emit.mjs"],
@@ -19,6 +20,7 @@ const COPIES = [
 ];
 // notify: surface failing runs (any tool). nudge: offer to start a watch on edit.
 // reset: on session start/resume, evict watchers left by previous sessions.
+// block: at end of turn, don't let the agent finish on a red suite (Stop has no matcher).
 const HOOKS_BY_EVENT = {
   PostToolUse: [
     { matcher: "*", command: `node "$CLAUDE_PROJECT_DIR/${DEST}/notify-on-fail.mjs"` },
@@ -27,6 +29,7 @@ const HOOKS_BY_EVENT = {
   SessionStart: [
     { matcher: "startup|resume", command: `node "$CLAUDE_PROJECT_DIR/${DEST}/reset-watch.mjs"` },
   ],
+  Stop: [{ command: `node "$CLAUDE_PROJECT_DIR/${DEST}/block-on-fail.mjs"` }],
 };
 
 // Materialize the detected test setup as test-warden.config.js source. Detection

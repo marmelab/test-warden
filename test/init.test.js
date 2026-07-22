@@ -32,11 +32,14 @@ test("init merges, preserves existing keys, and is idempotent", () => {
   );
   assert.equal(hooks.SessionStart.length, 1, "added the session reset hook");
   assert.equal(hooks.SessionStart[0].matcher, "startup|resume");
+  assert.equal(hooks.Stop.length, 1, "added the stop block hook");
+  assert.equal(hooks.Stop[0].matcher, undefined, "Stop hooks have no matcher");
 
   // Hook files copied into the project, with the core.js import rewritten.
   const hookDir = path.join(dir, ".claude/hooks/test-warden");
   for (const f of [
     "notify-on-fail.mjs",
+    "block-on-fail.mjs",
     "nudge-watch.mjs",
     "reset-watch.mjs",
     "emit.mjs",
@@ -53,6 +56,7 @@ test("init merges, preserves existing keys, and is idempotent", () => {
   const again = read(dir, ".claude/settings.json").hooks;
   assert.equal(again.PostToolUse.length, 3);
   assert.equal(again.SessionStart.length, 1);
+  assert.equal(again.Stop.length, 1);
 });
 
 test("init materializes detection as test-warden.config.js and never overwrites it", async () => {

@@ -129,8 +129,13 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
   // On-disk mirror of the in-memory `log` array, so `test-warden logs <dir>` (a
   // separate process that can't read this one's memory) can read the watcher's output.
   const logFile = path.join(os.tmpdir(), `test-warden-${slug}.log`);
+  // Present exactly while a run is in flight — the cross-process signal the Stop hook
+  // polls to wait a run out before judging pass/fail (it can't see the in-memory
+  // run-state below). Created on run-start, removed on the idle prompt.
+  const runningFile = path.join(os.tmpdir(), `test-warden-${slug}.running`);
   try {
     fs.rmSync(resultsFile, { force: true });
+    fs.rmSync(runningFile, { force: true }); // stale marker from a prior crashed session
     fs.writeFileSync(logFile, ""); // truncate any prior session's log
   } catch {
     /* ignore */
@@ -186,6 +191,7 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
     resultsFile,
     liveFile,
     logFile,
+    runningFile,
     log,
     ready,
     triggeredMtime: 0,
@@ -193,6 +199,7 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
     idleAt: 0,
     idleResultsMtime: 0, // results mtime as of the last idle prompt = last completed run
     lastOutputAt: 0,
+    running: false, // mirrors the .running marker so it's written once per run, not per chunk
   };
   // Idle-prompt marker: the runner is waiting, not running. vitest prints "Waiting for
   // file changes" after a normal run and "Watching for file changes" after an
@@ -228,6 +235,18 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
       // floor get_results uses when it later catches a fresh run mid-flight.
       session.idleResultsMtime = resultsMtime(session);
       tail = "";
+      session.running = false;
+      fs.rmSync(session.runningFile, { force: true }); // run finished — drop the marker
+    } else if (session.lastOutputAt > session.idleAt + IDLE_SETTLE_MS && !session.running) {
+      // Output past the settle grace after idle ⇒ a run is genuinely under way (same
+      // gate as isRunning, so a trailing cosmetic chunk can't re-open it). Mark it so
+      // the Stop hook waits this run out instead of judging the previous run's JSON.
+      session.running = true;
+      try {
+        fs.writeFileSync(session.runningFile, "");
+      } catch {
+        /* tmp unwritable — Stop hook just won't wait; no worse than before */
+      }
     }
   });
   return session;
@@ -371,6 +390,7 @@ export async function startWatchCore(params) {
         fs.rmSync(session.liveFile, { force: true });
         fs.rmSync(session.resultsFile, { force: true });
         fs.rmSync(session.logFile, { force: true });
+        fs.rmSync(session.runningFile, { force: true });
       }
     });
     sessions.set(cwd, session);
