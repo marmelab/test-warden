@@ -191,19 +191,22 @@ test("shutdown quits the watcher gracefully so the suite's global teardown runs"
 
 test("start_watch takes the watch over from a forgotten live server (newest wins)", async () => {
   const a = spawnServer();
-  const b = spawnServer();
+  let b;
   try {
     await boot(a);
     assert.match(await startWatch(a), /Started vitest watch/);
     assert.equal(markerPid(), a.pid, "first server owns the watch");
 
-    // Second session starts while the first is still alive and holding the watch.
+    // Second session starts while the first is still alive and holding the watch —
+    // spawned only now, so its boot auto-start sees a's live marker and stays
+    // passive; the explicit start_watch below is what takes the watch over.
+    b = spawnServer();
     await boot(b);
     assert.match(await startWatch(b), /Started vitest watch/);
     assert.equal(markerPid(), b.pid, "second server took the watch over");
     assert.equal(await exitOf(a, 15_000), 0, "evicted server exited cleanly");
   } finally {
-    for (const p of [a, b]) if (p.exitCode === null) p.kill("SIGKILL");
+    for (const p of [a, b]) if (p && p.exitCode === null) p.kill("SIGKILL");
     fs.rmSync(LIVE_FILE, { force: true });
   }
 });
