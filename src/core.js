@@ -1,9 +1,11 @@
-// Helpers extracted so they're testable without importing index.js (which opens
-// an MCP transport on import).
+// Pure helpers, kept out of the server entrypoint so tests can import them without
+// index.js — importing that opens an MCP transport.
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
+
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Stable per-project key. realpath collapses symlinks, `..`, and trailing slashes,
 // so the same directory spelled two ways yields ONE slug — one watcher, one results
@@ -29,8 +31,8 @@ export function watcherAlive(dir, slug) {
   const live = path.join(dir, `test-warden-${slug}.live`);
   let pid;
   try {
-    // Marker format: "<pid>\n<cwd>" (the cwd lets the session-start reset hook scope
-    // eviction to one project); older versions wrote the pid alone.
+    // Marker format: "<pid>\n<cwd>" — the cwd lets the session-start reset hook scope
+    // eviction to one project; the pid is the first line.
     pid = Number(fs.readFileSync(live, "utf8").split("\n")[0]);
   } catch {
     return 0; // no marker — not watched

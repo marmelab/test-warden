@@ -3,15 +3,14 @@
 // pty and format the engine's return values as MCP text content.
 import fs from "node:fs";
 import { z } from "zod";
+import { sleep } from "./core.js";
+import { markTriggered, waitForResults } from "./results.js";
 import {
   sessions,
-  sleep,
   requireSession,
-  markTriggered,
   stopSession,
   startWatchCore,
   ensureSession,
-  waitForResults,
   awaitReady,
 } from "./session.js";
 

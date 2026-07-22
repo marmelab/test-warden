@@ -6,11 +6,11 @@
 import fs from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadConfig } from "./core.js";
+import { loadConfig, sleep } from "./core.js";
 import {
   setConfig,
+  startIdleSweep,
   sessions,
-  sleep,
   stopSession,
   startWatchCore,
   watchedElsewhere,
@@ -40,6 +40,7 @@ try {
   process.exit(1);
 }
 setConfig(CONFIG);
+startIdleSweep(); // side-effecting timer starts here, not at module import
 
 // --- MCP server -------------------------------------------------------------
 const server = new McpServer({ name: "test-warden", version: "0.1.0" });
