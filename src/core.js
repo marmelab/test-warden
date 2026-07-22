@@ -1,6 +1,7 @@
 // Pure helpers, kept out of the server entrypoint so tests can import them without
 // index.js — importing that opens an MCP transport.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -44,6 +45,39 @@ export function watcherAlive(dir, slug) {
     fs.rmSync(live, { force: true }); // stale marker from a dead/crashed server
     return 0;
   }
+}
+
+// Enumerate live test-warden instances by scanning the `.live` markers in `dir`
+// (defaults to $TMPDIR, where sessions drop them). The markers are the single source
+// of truth for "watched" — same as watcherAlive, which this reuses to probe each pid
+// and reap stale markers — so this needs no separate registry. Returns one row per
+// live watched dir: { pid, slug, cwd }. One server can hold several markers (a
+// monorepo watching several dirs), so pids may repeat across rows.
+export function listInstances(dir = os.tmpdir()) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return []; // no tmpdir / unreadable — nothing running
+  }
+  const rows = [];
+  for (const name of names) {
+    const m = /^test-warden-([0-9a-f]+)\.live$/.exec(name);
+    if (!m) continue;
+    const slug = m[1];
+    const pid = watcherAlive(dir, slug); // reaps the marker if its owner is dead
+    if (!pid) continue;
+    // watcherAlive read the first line (pid); the second is the cwd. Re-read for it.
+    let cwd = "";
+    try {
+      cwd = fs.readFileSync(path.join(dir, name), "utf8").split("\n")[1] ?? "";
+    } catch {
+      /* reaped between the two reads — skip */
+      continue;
+    }
+    rows.push({ pid, slug, cwd });
+  }
+  return rows;
 }
 
 // Which test runner does the project at `cwd` use? Looks at its package.json deps
