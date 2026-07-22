@@ -167,9 +167,12 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
     },
   });
   const log = [];
-  // Keystrokes written before the runner's watch UI is up are silently lost, so
-  // run_* must wait for readiness. The runner's own output is the signal: each
-  // prints its idle-prompt marker once (and only once) it accepts keys.
+  // The runner attaches its keypress handler at watch startup, before the initial run
+  // finishes — indeed before its first output chunk (verified on jest and vitest: a
+  // keystroke sent ~300ms in already interrupts the run). So the FIRST byte of output
+  // is a safe "accepts keys now" signal, and run_* need not wait out the initial run:
+  // awaitReady resolves here, then ensureIdle interrupts the initial run and the
+  // requested run starts immediately.
   let readyResolve;
   const ready = new Promise((r) => (readyResolve = r));
   // triggeredMtime 0: the results file was just deleted, so the watcher's initial run
@@ -191,7 +194,12 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
     idleResultsMtime: 0, // results mtime as of the last idle prompt = last completed run
     lastOutputAt: 0,
   };
-  const READY = /Waiting for file changes|Watch Usage/; // vitest | jest idle prompt
+  // Idle-prompt marker: the runner is waiting, not running. vitest prints "Waiting for
+  // file changes" after a normal run and "Watching for file changes" after an
+  // interrupted one; jest prints "Watch Usage". "for file changes" covers both vitest
+  // spellings — matching only "Waiting" would miss the post-interrupt idle that
+  // ensureIdle's abort produces, leaving isRunning stuck true.
+  const IDLE = /for file changes|Watch Usage/;
   let tail = "";
   proc.onData((d) => {
     log.push(d);
@@ -205,7 +213,12 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
     }
     tail = (tail + d).slice(-1000); // rolling window; marker may span chunks
     session.lastOutputAt = Date.now();
-    if (READY.test(tail)) {
+    // First output ⇒ the keypress handler is up (see above); accept commands now.
+    if (readyResolve) {
+      readyResolve(true);
+      readyResolve = null;
+    }
+    if (IDLE.test(tail)) {
       // Idle prompt printed ⇒ the runner is waiting, not running. Clear the window so
       // the NEXT run's output re-opens the busy state (a lingering prompt would read
       // as still-idle through the following run).
@@ -215,10 +228,6 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
       // floor get_results uses when it later catches a fresh run mid-flight.
       session.idleResultsMtime = resultsMtime(session);
       tail = "";
-      if (readyResolve) {
-        readyResolve(true);
-        readyResolve = null;
-      }
     }
   });
   return session;
@@ -229,7 +238,44 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
 // edit) — no MCP call marked it — so get_results waits on it rather than handing back
 // the previous run's leftover JSON. Best-effort: the gap between the fs event and the
 // run's first output chunk still reads as idle, but that window is sub-perceptible.
-export const isRunning = (s) => s.lastOutputAt > s.idleAt;
+//
+// The settle grace matters: a trailing cosmetic chunk (vitest's "press h to show help"
+// hint, a cursor redraw) lands a few ms AFTER the idle-prompt marker, nudging
+// lastOutputAt just past idleAt — without the grace that reads as a fresh run and
+// wedges isRunning permanently true (jest ships its whole menu in one chunk and dodges
+// this; vitest doesn't). No real rerun starts this soon after the runner goes idle — it
+// needs an edit or keystroke — so the grace can't hide a genuine run.
+const IDLE_SETTLE_MS = 500;
+export const isRunning = (s) => s.lastOutputAt > s.idleAt + IDLE_SETTLE_MS;
+
+// A keystroke sent WHILE a run is in flight is swallowed to abort that run — it does
+// NOT also start a new one (verified on jest and vitest; true of any key). So a run_*
+// command fired mid-run just cancels the current run and triggers nothing, wedging the
+// caller on waitForResults. Serialize through the idle prompt: if a run is in flight
+// (e.g. one the runner's own fs-watch started after an edit), abort it with a single
+// harmless keystroke and wait for the idle prompt to reprint, so the caller's real
+// command lands from idle and actually runs. Bounded so a wedged watcher can't hang the
+// tool call — on timeout we proceed anyway (no worse than the pre-guard behavior).
+export async function ensureIdle(s, timeoutMs = 60_000) {
+  if (!isRunning(s)) return;
+  // Interrupt only a STEADY-STATE run — one that started after the session first reached
+  // its idle prompt (idleAt > 0), i.e. a rerun the runner's own fs-watch triggered. There
+  // Enter cancels the run and settles to idle without starting another (verified on jest
+  // and vitest; unbound keys are ignored mid-run, so Enter is the one that works). During
+  // the FIRST run the runner may still be in startup/collection, where vitest queues the
+  // Enter as a trigger instead of a cancel and spuriously double-runs — so there we just
+  // wait the (usually --changed-scoped, short) initial run out. Enter is safe here only
+  // because isRunning gates it strictly mid-run; at idle Enter would trigger a fresh run.
+  if (s.idleAt > 0) {
+    try {
+      s.proc.write("\r");
+    } catch {
+      /* pty already gone */
+    }
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (isRunning(s) && Date.now() < deadline) await sleep(50);
+}
 
 // Idle timeout: a warm watcher holds real RAM, and an abandoned session shouldn't
 // keep paying it. Activity = an MCP-triggered run or any completed auto-run (the

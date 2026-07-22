@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resultsMtime, markTriggered, waitForResults } from "../src/results.js";
-import { isRunning } from "../src/session.js";
+import { isRunning, ensureIdle } from "../src/session.js";
 
 // A minimal stand-in for a watch session: the results functions only ever touch
 // s.resultsFile and s.triggeredMtime, never the pty or the sessions map.
@@ -127,13 +127,61 @@ test("waitForResults: returns null when no fresh run lands within the timeout", 
   assert.equal(await waitForResults(s, 250), null);
 });
 
-test("isRunning: true once output arrives after the idle prompt, false when idle catches up", () => {
+test("isRunning: true once output arrives well after the idle prompt, false when idle catches up", () => {
   const s = { idleAt: 2000, lastOutputAt: 2000 }; // idle prompt is the latest thing seen
   assert.equal(isRunning(s), false);
-  s.lastOutputAt = 2500; // a rerun's output arrived after idle
+  s.lastOutputAt = 2100; // trailing cosmetic chunk (the "press h" hint) right after idle
+  assert.equal(isRunning(s), false); // within the settle grace ⇒ still idle, not a new run
+  s.lastOutputAt = 4000; // a real rerun's output arrived well after idle
   assert.equal(isRunning(s), true);
-  s.idleAt = 3000; // idle prompt reprinted ⇒ run finished
+  s.idleAt = 5000; // idle prompt reprinted ⇒ run finished
   assert.equal(isRunning(s), false);
+});
+
+test("ensureIdle: steady-state rerun — interrupts with one Enter, then waits for idle", async () => {
+  const writes = [];
+  const s = {
+    idleAt: 1000, // already reached idle once ⇒ steady state, safe to interrupt
+    lastOutputAt: 2000, // output since the last idle prompt ⇒ mid-run
+    proc: { write: (c) => writes.push(c) },
+  };
+  assert.equal(isRunning(s), true);
+  // The runner prints its idle prompt shortly after the interrupt key lands.
+  setTimeout(() => {
+    s.idleAt = 3000;
+  }, 100);
+  await ensureIdle(s, 2000);
+  assert.equal(isRunning(s), false);
+  assert.deepEqual(writes, ["\r"]); // one Enter to interrupt, nothing more
+});
+
+test("ensureIdle: initial run (never idle) — waits it out, sends no keystroke", async () => {
+  const writes = [];
+  const s = {
+    idleAt: 0, // never reached idle ⇒ startup/first run; Enter here can double-run vitest
+    lastOutputAt: 2000,
+    proc: { write: (c) => writes.push(c) },
+  };
+  assert.equal(isRunning(s), true);
+  // The initial run finishes and prints its first idle prompt on its own.
+  setTimeout(() => {
+    s.idleAt = 3000;
+  }, 100);
+  await ensureIdle(s, 2000);
+  assert.equal(isRunning(s), false);
+  assert.deepEqual(writes, []); // no interrupt during the first run
+});
+
+test("ensureIdle: no-op when already idle — sends nothing", async () => {
+  const writes = [];
+  const s = {
+    idleAt: 2000,
+    lastOutputAt: 2000, // idle prompt is the latest thing seen
+    proc: { write: (c) => writes.push(c) },
+  };
+  assert.equal(isRunning(s), false);
+  await ensureIdle(s, 1000);
+  assert.deepEqual(writes, []);
 });
 
 test("get_results contract: mid-run, wait for the fresh results — never the stale run", async () => {

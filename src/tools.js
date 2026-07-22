@@ -12,15 +12,16 @@ import {
   startWatchCore,
   ensureSession,
   awaitReady,
+  ensureIdle,
   isRunning,
 } from "./session.js";
 
 const CR = "\r";
 const text = (s) => ({ content: [{ type: "text", text: s }] });
 
-const notReadyText = (s) =>
+const notReadyText = (session) =>
   text(
-    `The ${s.runner} watcher in ${s.cwd} is still starting up — not accepting commands yet. Check tail_log for what it's doing.`,
+    `The ${session.runner} watcher in ${session.cwd} is still starting up — not accepting commands yet. Check tail_log for what it's doing.`,
   );
 
 const resultsText = (res) =>
@@ -97,13 +98,14 @@ export function registerTools(server) {
       inputSchema: runCwdArg,
     },
     async ({ cwd }) => {
-      const { session: s, error } = await ensureSession(cwd);
+      const { session, error } = await ensureSession(cwd);
       if (error) return text(error);
-      if (!(await awaitReady(s))) return notReadyText(s);
-      markTriggered(s);
-      s.proc.write("a"); // "a" = run all, in the runner's watch UI
-      s.fullScope = true; // "a" also durably escapes the startup --changed scope
-      return resultsText(await waitForResults(s));
+      if (!(await awaitReady(session))) return notReadyText(session);
+      await ensureIdle(session); // abort any in-flight run first, else "a" just cancels it
+      markTriggered(session);
+      session.proc.write("a"); // "a" = run all, in the runner's watch UI
+      session.fullScope = true; // "a" also durably escapes the startup --changed scope
+      return resultsText(await waitForResults(session));
     },
   );
 
@@ -115,12 +117,13 @@ export function registerTools(server) {
       inputSchema: runCwdArg,
     },
     async ({ cwd }) => {
-      const { session: s, error } = await ensureSession(cwd);
+      const { session, error } = await ensureSession(cwd);
       if (error) return text(error);
-      if (!(await awaitReady(s))) return notReadyText(s);
-      markTriggered(s);
-      s.proc.write("f"); // "f" = run only failed, in the runner's watch UI
-      return resultsText(await waitForResults(s));
+      if (!(await awaitReady(session))) return notReadyText(session);
+      await ensureIdle(session); // abort any in-flight run first, else "f" just cancels it
+      markTriggered(session);
+      session.proc.write("f"); // "f" = run only failed, in the runner's watch UI
+      return resultsText(await waitForResults(session));
     },
   );
 
@@ -139,32 +142,33 @@ export function registerTools(server) {
       },
     },
     async ({ pattern, by, cwd }) => {
-      const { session: s, error } = await ensureSession(cwd);
+      const { session, error } = await ensureSession(cwd);
       if (error) return text(error);
-      if (!(await awaitReady(s))) return notReadyText(s);
+      if (!(await awaitReady(session))) return notReadyText(session);
+      await ensureIdle(session); // abort any in-flight run first, else our keystrokes just cancel it
       // The watch starts scoped to changed files, and the interactive filter only
       // searches within that scope — so a filter for an untouched file finds nothing.
       // Escape once per session: run the full suite ("a") and let it land — filtering
       // mid-run cancels it before the scope widens — then filters see all files.
       // ponytail: costs one full-suite run on a session's first run_filtered; piloting
       // the watcher offers no cheaper reliable escape.
-      if (!s.fullScope) {
-        markTriggered(s);
-        s.proc.write("a");
-        await waitForResults(s);
-        s.fullScope = true;
+      if (!session.fullScope) {
+        markTriggered(session);
+        session.proc.write("a");
+        await waitForResults(session);
+        session.fullScope = true;
       }
-      markTriggered(s);
+      markTriggered(session);
       // Type the filter like a human: one keystroke per write, with a breath between.
       // A coalesced chunk ("todo\r") reaches jest's prompt as ONE key — the pattern
       // shows but the trailing Enter never registers, wedging the watcher in pattern
       // mode and eating every later keystroke.
-      s.proc.write(by === "name" ? "t" : "p"); // "t" = filter by test name, "p" = by path
+      session.proc.write(by === "name" ? "t" : "p"); // "t" = filter by test name, "p" = by path
       for (const ch of pattern + CR) {
         await sleep(25);
-        s.proc.write(ch);
+        session.proc.write(ch);
       }
-      return resultsText(await waitForResults(s));
+      return resultsText(await waitForResults(session));
     },
   );
 
@@ -176,7 +180,7 @@ export function registerTools(server) {
       inputSchema: cwdArg,
     },
     async ({ cwd }) => {
-      const s = requireSession(cwd);
+      const session = requireSession(cwd);
       // If the watcher is mid-run — typically an edit its own fs-watch just picked up —
       // floor at the last-idle mtime so waitForResults holds out for that run's fresh
       // write instead of returning the previous, pre-edit results. NOT the current
@@ -184,8 +188,8 @@ export function registerTools(server) {
       // prompt), and flooring there would wait for a write that never comes — wedging
       // get_results in "pending". Idle ⇒ no floor bump, so the latest results come
       // straight back.
-      if (isRunning(s)) markTriggered(s, s.idleResultsMtime);
-      return resultsText(await waitForResults(s));
+      if (isRunning(session)) markTriggered(session, session.idleResultsMtime);
+      return resultsText(await waitForResults(session));
     },
   );
 
@@ -211,13 +215,13 @@ export function registerTools(server) {
       const targets = cwd ? [requireSession(cwd)] : [...sessions.values()];
       if (!targets.length) return text("No session running.");
       await Promise.all(targets.map(stopSession)); // graceful — teardowns run
-      for (const s of targets) {
+      for (const session of targets) {
         // onExit's cleanup normally handles both, but belt-and-braces for a watcher
         // that had to be hard-killed mid-boot.
-        sessions.delete(s.cwd);
-        fs.rmSync(s.liveFile, { force: true });
+        sessions.delete(session.cwd);
+        fs.rmSync(session.liveFile, { force: true });
       }
-      return text(`Stopped: ${targets.map((s) => s.cwd).join(", ")}.`);
+      return text(`Stopped: ${targets.map((session) => session.cwd).join(", ")}.`);
     },
   );
 }
