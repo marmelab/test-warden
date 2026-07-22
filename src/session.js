@@ -126,8 +126,12 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
   // Unlike resultsFile (deleted here, reappears only after the first run), it exists
   // for the whole session, so the hook never false-nudges a freshly-started watch.
   const liveFile = path.join(os.tmpdir(), `test-warden-${slug}.live`);
+  // On-disk mirror of the in-memory `log` array, so `test-warden logs <dir>` (a
+  // separate process that can't read this one's memory) can read the watcher's output.
+  const logFile = path.join(os.tmpdir(), `test-warden-${slug}.log`);
   try {
     fs.rmSync(resultsFile, { force: true });
+    fs.writeFileSync(logFile, ""); // truncate any prior session's log
   } catch {
     /* ignore */
   }
@@ -178,6 +182,7 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
     cwd,
     resultsFile,
     liveFile,
+    logFile,
     log,
     ready,
     triggeredMtime: 0,
@@ -191,6 +196,13 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
   proc.onData((d) => {
     log.push(d);
     if (log.length > 400) log.splice(0, log.length - 400);
+    // ponytail: append-only, truncated per spawn; rotate if a long-lived chatty
+    // session ever bloats $TMPDIR.
+    try {
+      fs.appendFileSync(logFile, d);
+    } catch {
+      /* tmp unwritable — the log CLI just reports no log */
+    }
     tail = (tail + d).slice(-1000); // rolling window; marker may span chunks
     session.lastOutputAt = Date.now();
     if (READY.test(tail)) {
@@ -312,6 +324,7 @@ export async function startWatchCore(params) {
         sessions.delete(cwd);
         fs.rmSync(session.liveFile, { force: true });
         fs.rmSync(session.resultsFile, { force: true });
+        fs.rmSync(session.logFile, { force: true });
       }
     });
     sessions.set(cwd, session);

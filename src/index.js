@@ -4,9 +4,11 @@
 // This file is the entrypoint only: CLI dispatch, config load, wiring the session
 // engine (session.js) to the MCP tools (tools.js), process lifecycle, and boot.
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadConfig, sleep } from "./core.js";
+import { loadConfig, listInstances, slugFor, sleep } from "./core.js";
 import {
   setConfig,
   startIdleSweep,
@@ -24,6 +26,98 @@ import { registerTools } from "./tools.js";
 if (process.argv[2] === "init" || process.argv[2] === "bootstrap") {
   const mod = await import("./init.js");
   (process.argv[2] === "init" ? mod.run : mod.bootstrap)();
+  process.exit(0);
+}
+
+// Instance-management subcommands — inspect/control the live servers behind the .live
+// markers (see shutdown() below for the zombie/collision cases they're for), out of
+// band from any MCP client. They read the markers directly and need no config, so
+// they run before loadConfig. `logs -f` never returns (it follows), so nothing here
+// falls through to the server boot.
+const tmp = os.tmpdir();
+const logPath = (slug) => path.join(tmp, `test-warden-${slug}.log`);
+
+function cmdLs() {
+  const rows = listInstances();
+  if (!rows.length) return console.log("No test-warden running.");
+  console.log("PID\tDIR\tSLUG\tRESULTS");
+  for (const { pid, cwd, slug } of rows) {
+    let age = "—";
+    try {
+      const mtime = fs.statSync(path.join(tmp, `test-warden-${slug}.json`)).mtimeMs;
+      age = `${Math.round((Date.now() - mtime) / 1000)}s ago`;
+    } catch {
+      /* no results file yet — first run hasn't completed */
+    }
+    console.log(`${pid}\t${cwd}\t${slug}\t${age}`);
+  }
+}
+
+function cmdKill(args) {
+  const all = args.includes("--all");
+  const dir = args.find((a) => !a.startsWith("-"));
+  if (!all && !dir) {
+    console.error("usage: test-warden kill <dir> | --all");
+    process.exit(1);
+  }
+  const rows = listInstances();
+  const targets = all ? rows : rows.filter((r) => r.slug === slugFor(dir));
+  if (!targets.length)
+    return console.log(all ? "No test-warden running." : `No test-warden watching ${dir}.`);
+  // One server can hold several markers (a monorepo watching several dirs), so SIGTERM
+  // each pid once. Its own shutdown() then quits every watcher gracefully and reaps the
+  // markers — no SIGKILL escalation.
+  for (const pid of new Set(targets.map((r) => r.pid))) {
+    try {
+      process.kill(pid, "SIGTERM");
+      console.log(`Sent SIGTERM to ${pid}.`);
+    } catch {
+      console.log(`pid ${pid} already gone.`);
+    }
+  }
+}
+
+async function cmdLogs(args) {
+  const follow = args.includes("-f") || args.includes("--follow");
+  const dir = args.find((a) => !a.startsWith("-"));
+  if (!dir) {
+    console.error("usage: test-warden logs <dir> [-f]");
+    process.exit(1);
+  }
+  const file = logPath(slugFor(dir));
+  let content;
+  try {
+    content = fs.readFileSync(file); // raw bytes — .length is the byte offset to follow from
+  } catch {
+    return console.log("(no log; not watched, or watcher just started)");
+  }
+  process.stdout.write(content);
+  if (!follow) return;
+  // Follow: stream appended bytes; re-read from the top on truncate (a new session
+  // starts the log fresh). fs.watch keeps the event loop alive until Ctrl-C.
+  let offset = content.length;
+  fs.watch(file, () => {
+    let size;
+    try {
+      size = fs.statSync(file).size;
+    } catch {
+      return; // reaped mid-follow — the session ended
+    }
+    if (size < offset) offset = 0; // truncated ⇒ new session
+    if (size <= offset) return;
+    const fd = fs.openSync(file, "r");
+    const buf = Buffer.alloc(size - offset);
+    fs.readSync(fd, buf, 0, buf.length, offset);
+    fs.closeSync(fd);
+    process.stdout.write(buf);
+    offset = size;
+  });
+  await new Promise(() => {}); // never resolves — stay alive following
+}
+
+const MANAGE = { ls: cmdLs, kill: cmdKill, logs: cmdLogs };
+if (MANAGE[process.argv[2]]) {
+  await MANAGE[process.argv[2]](process.argv.slice(3));
   process.exit(0);
 }
 
@@ -64,6 +158,7 @@ async function shutdown() {
     s.proc.kill();
     fs.rmSync(s.liveFile, { force: true });
     fs.rmSync(s.resultsFile, { force: true });
+    fs.rmSync(s.logFile, { force: true });
   }
   process.exit(0);
 }
