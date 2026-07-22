@@ -12,6 +12,7 @@ import {
   startWatchCore,
   ensureSession,
   awaitReady,
+  isRunning,
 } from "./session.js";
 
 const CR = "\r";
@@ -176,6 +177,11 @@ export function registerTools(server) {
     },
     async ({ cwd }) => {
       const s = requireSession(cwd);
+      // If the watcher is mid-run — typically an edit its own fs-watch just picked up —
+      // snapshot now so waitForResults holds out for that run's fresh write instead of
+      // returning the previous, pre-edit results (whose mtime already beats the last
+      // trigger). Idle ⇒ no snapshot, so the latest results come straight back.
+      if (isRunning(s)) markTriggered(s);
       return resultsText(await waitForResults(s));
     },
   );

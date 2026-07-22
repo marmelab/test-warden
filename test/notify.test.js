@@ -26,7 +26,8 @@ const run = () =>
   });
 
 // A live watcher must exist for results to count — mark this test process as the owner.
-const markLive = () => fs.writeFileSync(liveMarker, String(process.pid));
+// Canonical marker format: "<pid>\n<cwd>" (watcherAlive reads the pid; reset reads cwd).
+const markLive = () => fs.writeFileSync(liveMarker, `${process.pid}\n${TMP}`);
 
 const writeResults = (blob, mtimeMs) => {
   fs.writeFileSync(resultsFile, JSON.stringify(blob));
@@ -102,7 +103,7 @@ test("two workspaces: a passing one doesn't mask the other's failure", () => {
     const f = path.join(tmp, `test-warden-123-${slug}.json`);
     fs.writeFileSync(f, JSON.stringify(blob));
     fs.utimesSync(f, mtime / 1000, mtime / 1000);
-    fs.writeFileSync(path.join(tmp, `test-warden-${slug}.live`), String(process.pid)); // live watcher
+    fs.writeFileSync(path.join(tmp, `test-warden-${slug}.live`), `${process.pid}\n${tmp}`); // live watcher
   };
   const runIn = () =>
     execFileSync("node", [HOOK], {

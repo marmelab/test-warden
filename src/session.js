@@ -167,22 +167,11 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
   // prints its idle-prompt marker once (and only once) it accepts keys.
   let readyResolve;
   const ready = new Promise((r) => (readyResolve = r));
-  const READY = /Waiting for file changes|Watch Usage/; // vitest | jest idle prompt
-  let tail = "";
-  proc.onData((d) => {
-    log.push(d);
-    if (log.length > 400) log.splice(0, log.length - 400);
-    if (readyResolve) {
-      tail = (tail + d).slice(-1000); // rolling window; marker may span chunks
-      if (READY.test(tail)) {
-        readyResolve(true);
-        readyResolve = null;
-      }
-    }
-  });
-  // triggeredMtime 0: the results file was just deleted, so the watcher's initial
-  // run counts as fresh the first time get_results waits on it.
-  return {
+  // triggeredMtime 0: the results file was just deleted, so the watcher's initial run
+  // counts as fresh the first time get_results waits on it. idleAt/lastOutputAt track
+  // run-state from the stream (see isRunning): a rerun no MCP call triggered — one the
+  // runner's own fs-watch caught after an edit — is only observable here.
+  const session = {
     proc,
     runner,
     cwd,
@@ -192,8 +181,37 @@ async function spawnWatcher({ runner, bin, cwd, args, env }) {
     ready,
     triggeredMtime: 0,
     lastActivity: Date.now(),
+    idleAt: 0,
+    lastOutputAt: 0,
   };
+  const READY = /Waiting for file changes|Watch Usage/; // vitest | jest idle prompt
+  let tail = "";
+  proc.onData((d) => {
+    log.push(d);
+    if (log.length > 400) log.splice(0, log.length - 400);
+    tail = (tail + d).slice(-1000); // rolling window; marker may span chunks
+    session.lastOutputAt = Date.now();
+    if (READY.test(tail)) {
+      // Idle prompt printed ⇒ the runner is waiting, not running. Clear the window so
+      // the NEXT run's output re-opens the busy state (a lingering prompt would read
+      // as still-idle through the following run).
+      session.idleAt = Date.now();
+      tail = "";
+      if (readyResolve) {
+        readyResolve(true);
+        readyResolve = null;
+      }
+    }
+  });
+  return session;
 }
+
+// True while the runner is mid-run: output has arrived since its idle prompt last
+// showed. This is the only signal for a rerun the runner's own fs-watch triggered (an
+// edit) — no MCP call marked it — so get_results waits on it rather than handing back
+// the previous run's leftover JSON. Best-effort: the gap between the fs event and the
+// run's first output chunk still reads as idle, but that window is sub-perceptible.
+export const isRunning = (s) => s.lastOutputAt > s.idleAt;
 
 // Idle timeout: a warm watcher holds real RAM, and an abandoned session shouldn't
 // keep paying it. Activity = an MCP-triggered run or any completed auto-run (the

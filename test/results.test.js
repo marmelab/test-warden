@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resultsMtime, markTriggered, waitForResults } from "../src/results.js";
+import { isRunning } from "../src/session.js";
 
 // A minimal stand-in for a watch session: the results functions only ever touch
 // s.resultsFile and s.triggeredMtime, never the pty or the sessions map.
@@ -60,4 +61,82 @@ test("waitForResults: returns the normalized summary once a fresh run lands", as
   assert.equal(res.ok, false);
   assert.equal(res.failures.length, 1);
   assert.equal(res.failures[0].file, "/proj/a.test.js");
+});
+
+test("waitForResults: never returns the previous run's stale JSON — only a fresher one", async () => {
+  const s = fakeSession();
+  // A completed prior run sits in the file, and the session was triggered at its mtime:
+  // nothing fresh has landed yet, so the leftover JSON must NOT be returned.
+  fs.writeFileSync(s.resultsFile, JSON.stringify(VITEST_SHAPE));
+  const staleMtime = resultsMtime(s);
+  s.triggeredMtime = staleMtime;
+
+  // A fresh run lands mid-wait with a newer mtime and different counts.
+  const fresh = {
+    numTotalTests: 5,
+    numPassedTests: 5,
+    numFailedTests: 0,
+    numFailedTestSuites: 0,
+    testResults: [],
+  };
+  setTimeout(() => {
+    fs.writeFileSync(s.resultsFile, JSON.stringify(fresh));
+    const bumped = (staleMtime + 1000) / 1000;
+    fs.utimesSync(s.resultsFile, bumped, bumped); // guarantee mtime advances past the trigger
+  }, 150);
+
+  const res = await waitForResults(s, 5_000);
+  assert.equal(res.total, 5); // the fresh run, never the stale 2-test one
+  assert.equal(res.ok, true);
+});
+
+test("waitForResults: returns null when no fresh run lands within the timeout", async () => {
+  const s = fakeSession();
+  // File present but stale vs the trigger — nothing newer will land, so the poll loop
+  // must hit its deadline and return null (the "still running after Ns" signal).
+  fs.writeFileSync(s.resultsFile, JSON.stringify(VITEST_SHAPE));
+  s.triggeredMtime = resultsMtime(s);
+  assert.equal(await waitForResults(s, 250), null);
+});
+
+test("isRunning: true once output arrives after the idle prompt, false when idle catches up", () => {
+  const s = { idleAt: 2000, lastOutputAt: 2000 }; // idle prompt is the latest thing seen
+  assert.equal(isRunning(s), false);
+  s.lastOutputAt = 2500; // a rerun's output arrived after idle
+  assert.equal(isRunning(s), true);
+  s.idleAt = 3000; // idle prompt reprinted ⇒ run finished
+  assert.equal(isRunning(s), false);
+});
+
+test("get_results contract: mid-run, wait for the fresh results — never the stale run", async () => {
+  const s = fakeSession();
+  // The previous run's JSON (2 tests, 1 failed) is on disk, and the watcher is mid-run
+  // (output has arrived since the last idle prompt) — the edit-then-get_results race.
+  fs.writeFileSync(s.resultsFile, JSON.stringify(VITEST_SHAPE));
+  s.idleAt = 1000;
+  s.lastOutputAt = 2000;
+  assert.equal(isRunning(s), true);
+
+  // get_results' rule when running: snapshot now, then hold out for a newer write.
+  markTriggered(s);
+
+  // The in-flight run completes with fresh, all-green results.
+  setTimeout(() => {
+    fs.writeFileSync(
+      s.resultsFile,
+      JSON.stringify({
+        numTotalTests: 5,
+        numPassedTests: 5,
+        numFailedTests: 0,
+        numFailedTestSuites: 0,
+        testResults: [],
+      }),
+    );
+    const bumped = (resultsMtime(s) + 1000) / 1000;
+    fs.utimesSync(s.resultsFile, bumped, bumped);
+  }, 150);
+
+  const res = await waitForResults(s, 5_000);
+  assert.equal(res.total, 5); // the fresh run, never the stale 2-test one
+  assert.equal(res.ok, true);
 });

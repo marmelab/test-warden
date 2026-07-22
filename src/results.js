@@ -44,10 +44,10 @@ function readResults(s) {
 // Block until the watch's in-flight run lands, rather than returning pending and making
 // the agent poll. Trust the JSON only once its mtime advanced past the trigger (a fresh
 // run) and it parses (not mid-write). Returns the summary, or null if still running.
-// ponytail: 30s ceiling so we return before a typical MCP client request timeout; bump
-// it or make it an arg if a suite legitimately runs longer.
-export async function waitForResults(s) {
-  const deadline = Date.now() + 30_000;
+// ponytail: 30s default ceiling so we return before a typical MCP client request
+// timeout; overridable via timeoutMs (tests pass a small one; bump for a slow suite).
+export async function waitForResults(s, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const res = resultsMtime(s) > s.triggeredMtime ? readResults(s) : null;
     if (res) return res;
