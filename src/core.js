@@ -111,43 +111,52 @@ export function scriptEnv(cwd) {
   return parseScriptEnv(pkg.scripts?.test);
 }
 
-// Schema check via zod. zod ships with the server, but this file is also copied next
-// to the project's hooks, where zod may not resolve — validation is then skipped (the
-// server validated the same file at startup, so the hook still reads sane entries).
-async function validateConfig(entries, file) {
-  let z;
-  try {
-    ({ z } = await import("zod"));
-  } catch {
-    return entries;
+// Schema check, hand-rolled (no zod). This file is copied next to the project's hooks
+// by `init`, decoupled from any node_modules — so a dependency here would resolve only
+// if the USER's project happened to ship it, silently skipping validation otherwise
+// (the nudge hook's whole job is to surface a broken config). Plain JS ships intact.
+// The server still uses zod for its MCP tool schemas (tools.js); only this validator
+// must stay dependency-free. Errors read `entries[i].key: why`, mirroring the old zod
+// output the callers and tests expect.
+const ALLOWED = ["dir", "runner", "args", "env", "bin"];
+function validateConfig(entries, file) {
+  const issues = [];
+  if (!Array.isArray(entries)) issues.push("entries: expected an array");
+  else if (entries.length === 0) issues.push("entries: at least one entry is required");
+  const out = [];
+  for (const [i, e] of (Array.isArray(entries) ? entries : []).entries()) {
+    const at = `entries[${i}]`;
+    if (e === null || typeof e !== "object" || Array.isArray(e)) {
+      issues.push(`${at}: expected an object`);
+      continue;
+    }
+    for (const k of Object.keys(e))
+      if (!ALLOWED.includes(k)) issues.push(`${at}.${k}: unrecognized key (likely a typo)`);
+    if (e.runner !== "jest" && e.runner !== "vitest")
+      issues.push(`${at}.runner: must be "jest" or "vitest"`);
+    for (const k of ["dir", "args", "bin"])
+      if (e[k] !== undefined && typeof e[k] !== "string")
+        issues.push(`${at}.${k}: expected a string`);
+    if (e.env !== undefined) {
+      if (e.env === null || typeof e.env !== "object" || Array.isArray(e.env))
+        issues.push(`${at}.env: expected an object of string values`);
+      else
+        for (const [k, v] of Object.entries(e.env))
+          if (typeof v !== "string") issues.push(`${at}.env.${k}: expected a string`);
+    }
+    out.push({
+      dir: e.dir ?? ".",
+      runner: e.runner,
+      args: e.args ?? "",
+      env: e.env ?? {},
+      ...(e.bin !== undefined && { bin: e.bin }),
+    });
   }
-  const Entry = z
-    .object({
-      dir: z.string().default("."),
-      runner: z.enum(["jest", "vitest"]),
-      args: z.string().default(""),
-      env: z.record(z.string()).default({}),
-      bin: z.string().optional(),
-    })
-    .strict(); // unknown keys are almost always typos — fail loudly
-  const res = z
-    .array(Entry)
-    .min(1, "at least one entry is required")
-    .safeParse(entries);
-  if (!res.success) {
-    const why = res.error.issues
-      .map((i) => {
-        const where = i.path.length
-          ? `entries[${i.path[0]}]` + i.path.slice(1).map((p) => `.${p}`).join("")
-          : "entries";
-        return `${where}: ${i.message}`;
-      })
-      .join("; ");
+  if (issues.length)
     throw new Error(
-      `Invalid ${file} — ${why}. Fix it by hand or regenerate with \`npx test-warden bootstrap\` (overwrites).`,
+      `Invalid ${file} — ${issues.join("; ")}. Fix it by hand or regenerate with \`npx test-warden bootstrap\` (overwrites).`,
     );
-  }
-  return res.data;
+  return out;
 }
 
 // Load and validate test-warden.config.js from `root` — the REQUIRED description of
@@ -164,7 +173,7 @@ export async function loadConfig(root) {
       `${file} not found. Run \`npx test-warden init\` to bootstrap it, then edit it to describe your test setup.`,
     );
   const mod = await import(pathToFileURL(file).href);
-  const entries = await validateConfig([].concat(mod.default ?? []), file);
+  const entries = validateConfig([].concat(mod.default ?? []), file);
   return entries.map((e) => {
     let dir = path.resolve(root, e.dir);
     try {

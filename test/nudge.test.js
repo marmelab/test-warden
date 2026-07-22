@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { run as initRun } from "../src/init.js";
 
 const HOOK = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -70,6 +71,35 @@ test("surfaces an invalid config to the agent", () => {
     'module.exports = [{ dir: "packages/api", runner: "mocha" }];',
   );
   const ctx = JSON.parse(run(apiFile)).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /Invalid .*test-warden\.config\.js/);
+  assert.match(ctx, /runner/);
+});
+
+test("surfaces an invalid config from the COPIED hook layout, with no zod resolvable", () => {
+  // The shipped reality: `init` copies the hooks (+ core.js) into the project, which
+  // lives here in os.tmpdir() with no zod anywhere up the tree. If validation reached
+  // for an external dep it would silently skip and the hook would say nothing — the
+  // exact false-confidence the repo-local test above can't catch. Runs the ACTUAL
+  // copied file, decoupled from this repo's node_modules.
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "twm-nudge-copied-")));
+  fs.writeFileSync(
+    path.join(dir, "test-warden.config.js"),
+    'module.exports = [{ dir: ".", runner: "mocha" }];',
+  );
+  initRun(dir); // copies hooks + core.js, rewriting the ../src/core.js import to ./core.js
+  const edited = path.join(dir, "src.js");
+  fs.writeFileSync(edited, "");
+
+  const out = execFileSync(
+    "node",
+    [path.join(dir, ".claude/hooks/test-warden/nudge-watch.mjs")],
+    {
+      input: JSON.stringify({ tool_input: { file_path: edited } }),
+      encoding: "utf8",
+      env: { ...process.env, NODE_PATH: "" }, // no global-module escape hatch either
+    },
+  );
+  const ctx = JSON.parse(out).hookSpecificOutput.additionalContext;
   assert.match(ctx, /Invalid .*test-warden\.config\.js/);
   assert.match(ctx, /runner/);
 });
