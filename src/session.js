@@ -1,20 +1,39 @@
-// Watch-session registry + orchestration: owns the sessions map keyed by project dir,
-// resolves which session a command targets, and starts/restarts/auto-starts watches
-// (delegating the actual pty spawn to watcher.js), plus the idle sweep that reclaims
-// abandoned ones. The MCP tools call into here.
+// Watch-session engine: owns the sessions map keyed by project dir, resolves which
+// session a command targets, spawns/stops/restarts/auto-starts the pty watchers, and
+// runs the idle sweep that reclaims abandoned ones. The MCP tools call into here.
+import os from "node:os";
 import fs from "node:fs";
-import { resolveBin, sleep } from "./core.js";
-import { resultsMtime } from "./results.js";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-  spawnWatcher,
-  stopSession,
-  watchedElsewhere,
-  QUIT_GRACE_MS,
-} from "./watcher.js";
+  buildCommand,
+  resolveBin,
+  slugFor,
+  watcherAlive,
+  sleep,
+} from "./core.js";
+import { resultsMtime } from "./results.js";
 
-// Re-export the single-watcher lifecycle helpers so callers (tools.js, index.js) get
-// the whole engine surface from one module; watcher.js stays an internal detail.
-export { stopSession, watchedElsewhere, QUIT_GRACE_MS };
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const JEST_REPORTER = path.join(HERE, "jest-reporter.cjs");
+
+// node-pty is a native addon with NO Linux prebuilt binary — it must be compiled
+// (pnpm approve-builds / npm rebuild). Import it lazily, on first start_watch, not at
+// module load: an unbuilt addon then surfaces as a clear error from the tool call
+// instead of killing the server before the MCP handshake (which a client shows as a
+// permanent "Connecting…"). `init` never reaches this, so it stays addon-free.
+let ptyMod;
+async function getPty() {
+  try {
+    return (ptyMod ??= (await import("node-pty")).default);
+  } catch (e) {
+    throw new Error(
+      "node-pty failed to load — it has no Linux prebuild and must be compiled. Run " +
+        "`pnpm approve-builds` (or `npm rebuild node-pty`) where test-warden is " +
+        `installed, then restart. Original error: ${e.message}`,
+    );
+  }
+}
 
 // Materialized test setup, loaded and validated once at server startup and injected
 // here. It is the ONLY source of truth — no live detection — for how to run each
@@ -25,7 +44,7 @@ export const setConfig = (c) => {
 };
 
 // Keyed by canonical project dir so the same dir spelled two ways can't open two
-// watchers; the session object's shape is defined where it's built (watcher.js).
+// watchers; the session object's shape is defined where it's built (spawnWatcher).
 export const sessions = new Map();
 
 // Resolve which session a command targets: explicit cwd, else the only one.
@@ -48,6 +67,132 @@ export function requireSession(cwd) {
   throw new Error(
     `Multiple watch sessions active — pass cwd. Active: ${[...sessions.keys()].join(", ")}.`,
   );
+}
+
+// Cross-process guard: is a *different*, still-alive test-warden already watching this
+// project? A second file-watch on the same tree is a real perf hit — it can grind the
+// machine to a halt — so we refuse rather than spawn a duplicate. Reuses the shared
+// liveness check (same marker the hooks read); our own pid (a restart) reads as free.
+// This pre-check isn't atomic, and two servers auto-starting on the same cwd at boot
+// can collide — so spawnWatcher additionally claims the marker with O_EXCL; a lost
+// race surfaces as a clean error there, never as a duplicate watcher.
+export function watchedElsewhere(cwd) {
+  const pid = watcherAlive(os.tmpdir(), slugFor(cwd));
+  return pid === process.pid ? 0 : pid; // our own marker (restart) ⇒ free
+}
+
+// Stop a watcher the way a human would — press "q" — so the runner exits gracefully
+// and runs its teardown (globalSetup teardown, e.g. stopping the postgres a suite
+// spawned). A hard kill skips teardown and leaks those resources: the port stays
+// held and the next watch fails to boot. kill() only if the runner ignores "q" for
+// the grace period (wedged, or never got ready). Resolves once the process is gone;
+// idempotent, so overlapping stop paths (idle sweep + stop_watch) can't double-fire.
+// ponytail: env knob instead of config plumbing — TEST_WARDEN_QUIT_GRACE_MS overrides.
+export const QUIT_GRACE_MS = Number(process.env.TEST_WARDEN_QUIT_GRACE_MS) || 10_000;
+export function stopSession(s) {
+  if (!s.stopping) {
+    const exited = new Promise((r) => s.proc.onExit(r));
+    s.stopping = (async () => {
+      try {
+        s.proc.write("q");
+      } catch {
+        /* pty already gone */
+      }
+      const graceful = await Promise.race([
+        exited.then(() => true),
+        sleep(QUIT_GRACE_MS).then(() => false),
+      ]);
+      if (!graceful) s.proc.kill();
+      await exited;
+    })();
+  }
+  return s.stopping;
+}
+
+// Spawn a jest/vitest watch over a PTY and return the session object (proc, rolling
+// log, readiness promise, per-session file paths). Claims the liveness marker
+// atomically before spawning so two servers can't double-watch one tree. The caller
+// (startWatchCore) registers the returned session and wires its exit cleanup.
+async function spawnWatcher({ runner, bin, cwd, args, env }) {
+  const pty = await getPty(); // native addon; throws a clear message if unbuilt
+  // Per-cwd results file so concurrent watchers don't clobber each other's JSON.
+  const slug = slugFor(cwd);
+  const resultsFile = path.join(
+    os.tmpdir(),
+    `test-warden-${process.pid}-${slug}.json`,
+  );
+  // Liveness marker for the nudge hook: present + pid-alive ⇒ this cwd is watched.
+  // Unlike resultsFile (deleted here, reappears only after the first run), it exists
+  // for the whole session, so the hook never false-nudges a freshly-started watch.
+  const liveFile = path.join(os.tmpdir(), `test-warden-${slug}.live`);
+  try {
+    fs.rmSync(resultsFile, { force: true });
+  } catch {
+    /* ignore */
+  }
+  // Claim the marker atomically ("wx") BEFORE spawning: two servers auto-starting
+  // at the same instant both pass the watchedElsewhere pre-check (it isn't atomic),
+  // and a duplicate file-watch on one tree is the perf hit this exists to prevent.
+  // The loser gets EEXIST and errors out instead of spawning a second watcher.
+  const marker = `${process.pid}\n${cwd}`;
+  try {
+    fs.writeFileSync(liveFile, marker, { flag: "wx" });
+  } catch {
+    const pid = watcherAlive(os.tmpdir(), slug); // reaps a stale marker
+    if (pid && pid !== process.pid)
+      throw new Error(
+        `${cwd} is already watched by another test-warden (pid ${pid}).`,
+      );
+    fs.writeFileSync(liveFile, marker); // stale (reaped) or our own — overwrite
+  }
+  const cmd = buildCommand(runner, bin, resultsFile, JEST_REPORTER, args);
+  const proc = pty.spawn("/bin/sh", ["-c", cmd], {
+    name: "xterm-color",
+    cols: 120,
+    rows: 40,
+    cwd,
+    // Layer env: base process → caller env (startWatchCore already folded in the
+    // config entry's env, or the test script's inline vars as fallback) → our
+    // required vars (which must win, esp. CI="" for watch).
+    env: {
+      ...process.env,
+      ...env,
+      TEST_WATCH_MCP_OUT: resultsFile,
+      CI: "",
+    },
+  });
+  const log = [];
+  // Keystrokes written before the runner's watch UI is up are silently lost, so
+  // run_* must wait for readiness. The runner's own output is the signal: each
+  // prints its idle-prompt marker once (and only once) it accepts keys.
+  let readyResolve;
+  const ready = new Promise((r) => (readyResolve = r));
+  const READY = /Waiting for file changes|Watch Usage/; // vitest | jest idle prompt
+  let tail = "";
+  proc.onData((d) => {
+    log.push(d);
+    if (log.length > 400) log.splice(0, log.length - 400);
+    if (readyResolve) {
+      tail = (tail + d).slice(-1000); // rolling window; marker may span chunks
+      if (READY.test(tail)) {
+        readyResolve(true);
+        readyResolve = null;
+      }
+    }
+  });
+  // triggeredMtime 0: the results file was just deleted, so the watcher's initial
+  // run counts as fresh the first time get_results waits on it.
+  return {
+    proc,
+    runner,
+    cwd,
+    resultsFile,
+    liveFile,
+    log,
+    ready,
+    triggeredMtime: 0,
+    lastActivity: Date.now(),
+  };
 }
 
 // Idle timeout: a warm watcher holds real RAM, and an abandoned session shouldn't
@@ -134,10 +279,10 @@ export async function startWatchCore(params) {
   }
   try {
     const session = await spawnWatcher({ runner: cfg.runner, bin, cwd, args, env });
-    // Register into the map and wire the exit cleanup here (not in spawnWatcher) so
-    // the sessions map stays owned by this module. Guarded: a restart (kill old →
-    // start new) sets the new session before the old proc's exit fires, so only the
-    // still-current session clears the marker.
+    // Register into the map and wire the exit cleanup here so the sessions map stays
+    // owned by this module. Guarded: a restart (kill old → start new) sets the new
+    // session before the old proc's exit fires, so only the still-current session
+    // clears the marker.
     session.proc.onExit(() => {
       if (sessions.get(cwd) === session) {
         sessions.delete(cwd);
