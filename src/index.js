@@ -156,10 +156,9 @@ setInterval(() => {
 // project? A second file-watch on the same tree is a real perf hit — it can grind the
 // machine to a halt — so we refuse rather than spawn a duplicate. Reuses the shared
 // liveness check (same marker the hooks read); our own pid (a restart) reads as free.
-// ponytail: check-then-spawn isn't atomic — two servers starting in the same
-// millisecond could both win. Realistic triggers (config, two editor windows) are
-// human-paced, so a plain check suffices; switch to an O_EXCL lockfile only if
-// simultaneous starts ever actually collide.
+// This pre-check isn't atomic, and two servers auto-starting on the same cwd at boot
+// can collide — so startSession additionally claims the marker with O_EXCL; a lost
+// race surfaces as a clean error there, never as a duplicate watcher.
 function watchedElsewhere(cwd) {
   const pid = watcherAlive(os.tmpdir(), slugFor(cwd));
   return pid === process.pid ? 0 : pid; // our own marker (restart) ⇒ free
@@ -181,6 +180,21 @@ async function startSession({ runner, bin, cwd, args, env }) {
     fs.rmSync(resultsFile, { force: true });
   } catch {
     /* ignore */
+  }
+  // Claim the marker atomically ("wx") BEFORE spawning: two servers auto-starting
+  // at the same instant both pass the watchedElsewhere pre-check (it isn't atomic),
+  // and a duplicate file-watch on one tree is the perf hit this exists to prevent.
+  // The loser gets EEXIST and errors out instead of spawning a second watcher.
+  const marker = `${process.pid}\n${cwd}`;
+  try {
+    fs.writeFileSync(liveFile, marker, { flag: "wx" });
+  } catch {
+    const pid = watcherAlive(os.tmpdir(), slug); // reaps a stale marker
+    if (pid && pid !== process.pid)
+      throw new Error(
+        `${cwd} is already watched by another test-warden (pid ${pid}).`,
+      );
+    fs.writeFileSync(liveFile, marker); // stale (reaped) or our own — overwrite
   }
   const cmd = buildCommand(runner, bin, resultsFile, JEST_REPORTER, args);
   const proc = pty.spawn("/bin/sh", ["-c", cmd], {
@@ -217,7 +231,6 @@ async function startSession({ runner, bin, cwd, args, env }) {
       }
     }
   });
-  fs.writeFileSync(liveFile, `${process.pid}\n${cwd}`); // see watcherAlive for the format
   const s = {
     proc,
     runner,
@@ -399,7 +412,7 @@ server.registerTool(
   "start_watch",
   {
     description:
-      "Start a jest/vitest watch in the given project. Once started, the watch runs continuously and automatically reruns every test impacted by any unstaged change. After 30 min without a run it stops itself; any run_* call restarts it transparently. The setup (runner, env, flags) comes from the project's test-warden.config.js — cwd must match one of its entries.",
+      "Start (or restart, from cold) a jest/vitest watch in the given project. Rarely needed: every dir in test-warden.config.js is watched automatically from server startup, and calling this on a running watch restarts it. Once started, the watch runs continuously and automatically reruns every test impacted by any unstaged change. After 30 min without a run it stops itself; any run_* call restarts it transparently. The setup (runner, env, flags) comes from the project's test-warden.config.js — cwd must match one of its entries.",
     inputSchema: {
       cwd: z
         .string()
@@ -599,6 +612,20 @@ async function shutdown() {
 process.stdin.on("end", shutdown); // client closed the pipe — the session is over
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
+
+// Auto-start every configured watch at boot: no start_watch call is needed, and the
+// runner's own fs watching catches ANY change — editor, sed, git checkout — not just
+// tool-call edits. Awaited BEFORE the transport connects so a tool call can't race a
+// boot start on the same cwd (startWatchCore isn't reentrant per cwd); it returns at
+// pty-spawn, not suite-ready, so this stays sub-second. On failure (deps missing,
+// node-pty unbuilt) the error lands in the MCP logs and start_watch still works.
+// Boot does NOT evict another server's watch: two sessions opening the same repo
+// shouldn't SIGTERM each other on startup.
+for (const e of CONFIG) {
+  if (watchedElsewhere(e.dir)) continue;
+  const { error } = await startWatchCore({ cwd: e.dir });
+  if (error) console.error(`test-warden: auto-start ${e.dir}: ${error}`);
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
