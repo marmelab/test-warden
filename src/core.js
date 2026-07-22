@@ -186,6 +186,11 @@ export async function loadConfig(root) {
 }
 
 export function buildCommand(runner, bin, resultsFile, reporterPath, extra) {
+  // `extra` (config `args` + any per-call args) is spliced into the `sh -c` string
+  // UNQUOTED — it's a run of flags, not one shell token, so it can't be quoted like
+  // bin/resultsFile are. It therefore reaches the shell verbatim: benign here (config
+  // and MCP caller are trusted, and running the project's own tests is arbitrary code
+  // execution by design), but any untrusted value routed through it is an injection path.
   const args = extra ? ` ${extra}` : "";
   if (runner === "jest") {
     // `--watch` (not `--watchAll`) reruns only tests related to changed files and

@@ -44,12 +44,17 @@ function readResults(s) {
   }
 }
 
+// Default wait ceiling for a run to land, so we return before a typical MCP client
+// request timeout. The single source of truth: waitForResults defaults to it and the
+// tools' "still running after Ns" message reads from it, so the two can't drift.
+// ponytail: env knob instead of config plumbing — TEST_WARDEN_RESULTS_MS overrides.
+export const RESULTS_TIMEOUT_MS = Number(process.env.TEST_WARDEN_RESULTS_MS) || 30_000;
+
 // Block until the watch's in-flight run lands, rather than returning pending and making
 // the agent poll. Trust the JSON only once its mtime advanced past the trigger (a fresh
 // run) and it parses (not mid-write). Returns the summary, or null if still running.
-// ponytail: 30s default ceiling so we return before a typical MCP client request
-// timeout; overridable via timeoutMs (tests pass a small one; bump for a slow suite).
-export async function waitForResults(s, timeoutMs = 30_000) {
+// Tests pass an explicit small timeoutMs; production calls take the env-tunable default.
+export async function waitForResults(s, timeoutMs = RESULTS_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const res = resultsMtime(s) > s.triggeredMtime ? readResults(s) : null;

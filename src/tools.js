@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import { z } from "zod";
 import { sleep } from "./core.js";
-import { markTriggered, waitForResults } from "./results.js";
+import { markTriggered, waitForResults, RESULTS_TIMEOUT_MS } from "./results.js";
 import {
   sessions,
   requireSession,
@@ -28,7 +28,7 @@ const resultsText = (res) =>
     res
       ? JSON.stringify(res, null, 2)
       : JSON.stringify({ pending: true }, null, 2) +
-          "\n// Still running after 30s — retry, or check tail_log.",
+          `\n// Still running after ${Math.round(RESULTS_TIMEOUT_MS / 1000)}s — retry, or check tail_log.`,
   );
 
 // Shared selector: which watch session a command targets. Optional — omit when

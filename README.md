@@ -162,7 +162,7 @@ session always wins:
 
 ## Limitations
 
-- PTY uses `node-pty`; Windows support follows node-pty's (works, but less exercised here).
+- POSIX only: the watcher is launched through `/bin/sh`, so only macOS and Linux are supported. Windows is not.
 - A run takes a moment; after a `run_*` call, poll `get_results` until it returns counts.
 
 ## License
