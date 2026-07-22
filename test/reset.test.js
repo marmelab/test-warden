@@ -65,18 +65,3 @@ test("leaves other projects' watchers alone", () => {
   assert.equal(run(tmp, project).trim(), "", "silent — not this project's watcher");
   assert.ok(fs.existsSync(m), "other project's marker untouched");
 });
-
-test("old-format marker (pid only) is matched to the project root by slug", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "twm-reset-"));
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "twm-reset-proj-"));
-  const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
-  try {
-    fs.writeFileSync(marker(tmp, project), String(owner.pid)); // pre-upgrade format
-
-    const out = run(tmp, project);
-    assert.match(out, /Ask the user/);
-    assert.equal(owner.exitCode, null, "live watcher untouched");
-  } finally {
-    owner.kill("SIGKILL");
-  }
-});

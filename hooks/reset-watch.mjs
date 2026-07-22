@@ -9,7 +9,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { slugFor } from "../src/core.js";
 
 const DIR = process.env.TEST_WATCH_MCP_TMP || os.tmpdir();
 let root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
@@ -29,10 +28,6 @@ for (const name of fs.readdirSync(DIR)) {
   } catch {
     continue; // reaped meanwhile
   }
-  // Old-format markers (pid only) carry no cwd but can still be matched to the
-  // project root by slug; old markers for monorepo *packages* can't be attributed
-  // from here — the server's start_watch takeover handles those.
-  if (!cwd && name === `test-warden-${slugFor(root)}.live`) cwd = root;
   if (!cwd || (cwd !== root && !cwd.startsWith(root + path.sep))) continue; // other project
   try {
     process.kill(Number(pid), 0); // liveness probe only — never a kill
